@@ -18,8 +18,7 @@ class AapNavigation(
     private val settings: Settings
 ) {
     init {
-        com.andrerinas.openheadunit.hud.BydNavigationOutputs.start(context)
-        com.andrerinas.openheadunit.hud.SaicClusterNavigation.start(context)
+        com.andrerinas.openheadunit.hud.SaicNavigationOutputs.start(context)
     }
 
     private val helper = AapNavigationHelper(context)
@@ -31,9 +30,6 @@ class AapNavigation(
     private val debouncedBroadcastEmitter = Runnable {
         isBroadcastScheduled = false
         helper.sendFullNavigationBroadcast(snapshot, pendingNavEventType)
-        com.andrerinas.openheadunit.hud.SaicClusterNavigation.publish(
-            snapshot, navigationEnded = pendingNavEventType == NAV_EVENT_TYPE_STOP
-        )
     }
 
     fun process(message: AapMessage): Boolean {
@@ -188,12 +184,7 @@ class AapNavigation(
     }
 
     private fun scheduleDebouncedBroadcast(navEventType: Int) {
-        val bydFrame = if (settings.bydNavigationEnabled) com.andrerinas.openheadunit.hud.BydNavigationMapper.from(snapshot) else null
-        AppLog.i("BYD nav input event=$navEventType enabled=${settings.bydNavigationEnabled} " +
-            "status=${snapshot.clusterStatus?.payload?.status} steps=${snapshot.navigationState?.payload?.stepsCount} " +
-            "legacy=${snapshot.nextTurnDetail?.payload?.nextTurn} position=${snapshot.currentPosition != null} " +
-            "distance=${bydFrame?.distanceMeters} icon=${bydFrame?.clusterIcon}")
-        com.andrerinas.openheadunit.hud.BydNavigationOutputs.update(bydFrame)
+        com.andrerinas.openheadunit.hud.SaicNavigationOutputs.update(com.andrerinas.openheadunit.hud.SaicNavigationMapper.from(snapshot))
         pendingNavEventType = navEventType
         if (isBroadcastScheduled) return
         isBroadcastScheduled = true
