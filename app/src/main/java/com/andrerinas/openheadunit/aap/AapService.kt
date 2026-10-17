@@ -310,6 +310,7 @@ class AapService : Service(), UsbReceiver.Listener {
      */
     @Volatile
     private var userExitedAA = false
+    private var discoveryRearmJob: Job? = null
     @Volatile private var userExitCooldownUntil = 0L
 
     /** In-flight poke that may be waiting out [USER_EXIT_COOLDOWN_MS]. */
@@ -1715,6 +1716,12 @@ class AapService : Service(), UsbReceiver.Listener {
                 serviceScope.launch {
                     delay(500)
                     val discovery = networkDiscovery ?: return@launch
+                    // A probe of port 5277 during a live session is accepted and then closed by
+                    // onServiceFound, which leaves the phone's head unit server bound to it.
+                    if (commManager.isBusy) {
+                        AppLog.d("NetworkMonitor: a connection is live or being set up; not scanning")
+                        return@launch
+                    }
                     if (!discovery.startScan()) {
                         // Folded into a sweep that was already running — which was started for the
                         // network we have just left. Do not cancel it; just do not make the next
@@ -3090,12 +3097,18 @@ class AapService : Service(), UsbReceiver.Listener {
                 } else {
                     UnresponsivePeerPolicy.rescanDelayMs(commManager.silentPeerFailures)
                 }
-                serviceScope.launch {
+                // One re-arm at a time: every finished scan used to launch its own, so each extra
+                // start (Bluetooth auto-start, a network change) added a loop that never ended.
+                discoveryRearmJob?.cancel()
+                discoveryRearmJob = serviceScope.launch {
                     delay(delayMs)
+                    // A connection that is being set up may still fail its handshake before it
+                    // becomes a session, and then nothing else restarts the loop. Wait it out.
+                    while (wirelessServer != null && commManager.isBusy) {
+                        delay(DISCOVERY_BUSY_RECHECK_MS)
+                    }
                     if (wirelessServer == null) {
                         AppLog.i("AapService: Discovery loop ends — the wireless server is gone")
-                    } else if (commManager.isBusy) {
-                        AppLog.i("AapService: Discovery loop ends — a connection is live or being set up")
                     } else {
                         startDiscovery()
                     }
@@ -3897,6 +3910,7 @@ class AapService : Service(), UsbReceiver.Listener {
         /** Cooldown after user-initiated exit. SoftAP restart on MG4 often needs ~10–20s;
          *  poking while :5288 / hotspot are still down fails with a short wait. */
         private const val USER_EXIT_COOLDOWN_MS = 15_000L
+        private const val DISCOVERY_BUSY_RECHECK_MS = 10_000L
 
         /** Delay before AapService tries to handle a normal-mode USB attach as a fallback
          *  when UsbAttachedActivity doesn't fire (common on Chinese MediaTek headunits). */
