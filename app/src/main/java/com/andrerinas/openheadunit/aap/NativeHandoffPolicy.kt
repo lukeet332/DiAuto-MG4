@@ -157,4 +157,21 @@ object NativeHandoffPolicy {
      * cadence rather than giving up, which left nothing to answer a later tap or reconnect.
      */
     fun emptyRoundDelayMs(emptyRounds: Int): Long = if (emptyRounds < NO_DEVICE_POKE_ROUNDS) 3_000L else 15_000L
+
+    /** How long video must already have stalled for the phone hanging up Bluetooth to end the session. */
+    const val PEER_CLOSE_STALL_MS = 3_000L
+
+    /**
+     * Whether the phone closing the held Bluetooth channel should end the projection session now
+     * instead of at the 15 s AAP read timeout. No session has survived that close, but a stream
+     * still drawing frames is left alone. [lastFrameRenderedMs] is 0 when nothing has rendered.
+     */
+    fun shouldEndSessionOnPeerClose(
+        peerClosed: Boolean,
+        sessionConnected: Boolean,
+        lastFrameRenderedMs: Long,
+        nowMs: Long,
+    ): Boolean =
+        peerClosed && sessionConnected &&
+            (lastFrameRenderedMs == 0L || nowMs - lastFrameRenderedMs >= PEER_CLOSE_STALL_MS)
 }

@@ -299,4 +299,42 @@ class NativeHandoffPolicyTest {
         assertEquals(15_000L, NativeHandoffPolicy.emptyRoundDelayMs(emptyRounds = 20))
         assertEquals(15_000L, NativeHandoffPolicy.emptyRoundDelayMs(emptyRounds = 10_000))
     }
+
+    // --- the phone hanging up the held Bluetooth channel ---
+
+    private val stall = NativeHandoffPolicy.PEER_CLOSE_STALL_MS
+
+    private fun endsOnClose(
+        peerClosed: Boolean = true,
+        sessionConnected: Boolean = true,
+        lastFrameRenderedMs: Long = 1_000L,
+        nowMs: Long = 1_000L + stall,
+    ) = NativeHandoffPolicy.shouldEndSessionOnPeerClose(peerClosed, sessionConnected, lastFrameRenderedMs, nowMs)
+
+    /** 5 mid-drive drops: video already at 0 fps, the read timeout declared it 6-10 s later. */
+    @Test
+    fun `the phone hanging up with video stalled ends the session now`() {
+        assertTrue(endsOnClose())
+    }
+
+    @Test
+    fun `video still flowing keeps the session whatever Bluetooth does`() {
+        assertFalse(endsOnClose(nowMs = 1_000L + stall - 1))
+    }
+
+    /** Nothing rendered since the surface was set is no evidence the stream is alive. */
+    @Test
+    fun `no frame rendered at all counts as stalled`() {
+        assertTrue(endsOnClose(lastFrameRenderedMs = 0L, nowMs = 1_000L))
+    }
+
+    @Test
+    fun `a release we caused ourselves never ends the session`() {
+        assertFalse(endsOnClose(peerClosed = false))
+    }
+
+    @Test
+    fun `with no session up there is nothing to end`() {
+        assertFalse(endsOnClose(sessionConnected = false))
+    }
 }

@@ -135,6 +135,7 @@ class NativeAaHandshakeManager(
 
     private val settings = com.andrerinas.openheadunit.App.provide(context).settings
     private val commManager = com.andrerinas.openheadunit.App.provide(context).commManager
+    private val videoDecoder = com.andrerinas.openheadunit.App.provide(context).videoDecoder
     private var aaServerSocket: BluetoothServerSocket? = null
     private var hfpServerSocket: BluetoothServerSocket? = null
     // Extra RFCOMM listeners opened on secondary Bluetooth radios (dual-Bluetooth head units).
@@ -1108,6 +1109,16 @@ class NativeAaHandshakeManager(
                             if (action.peerClosed) "NativeAA: the phone closed the held Bluetooth channel."
                             else "NativeAA: the projection session ended; releasing the held Bluetooth channel."
                         )
+                        ifOwner(socket) {
+                            if (NativeHandoffPolicy.shouldEndSessionOnPeerClose(
+                                    action.peerClosed, commManager.isConnected,
+                                    videoDecoder.lastFrameRenderedMs, SystemClock.elapsedRealtime()
+                                )
+                            ) {
+                                AppLog.i("NativeAA: no video for ${NativeHandoffPolicy.PEER_CLOSE_STALL_MS / 1000}s+ and the phone hung up Bluetooth — ending the session now, not at the read timeout.")
+                                commManager.disconnect(sendByeBye = false, isUserExit = false)
+                            }
+                        }
                     }
                     is WppAction.Fail -> {
                         AppLog.w("NativeAA: Handshake failed — ${action.reason}.")
