@@ -38,6 +38,18 @@ object VideoStarvationPolicy {
     fun shouldAdvise(consecutiveStarvedSessions: Int): Boolean =
         consecutiveStarvedSessions == ADVISE_AFTER_STARVED_SESSIONS
 
+    /** Starved sessions in a row before the access point is restarted ahead of the next re-arm. */
+    const val RESTART_HOTSPOT_AFTER_STARVED_SESSIONS = 2
+
+    /**
+     * Whether to restart the head unit's access point before re-arming. On 25 Oct an AP restart was
+     * what ended a 14-session run with no video. Every second starved session, so each restart gets
+     * one session to prove itself; only when the user has given the app charge of the hotspot.
+     */
+    fun shouldRestartHotspot(consecutiveStarvedSessions: Int, appOwnsHotspot: Boolean): Boolean =
+        appOwnsHotspot && consecutiveStarvedSessions >= RESTART_HOTSPOT_AFTER_STARVED_SESSIONS &&
+            consecutiveStarvedSessions % RESTART_HOTSPOT_AFTER_STARVED_SESSIONS == 0
+
     /**
      * The streak after a session that [reachedHandshake] and rendered frames or not.
      *

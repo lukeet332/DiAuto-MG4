@@ -177,6 +177,9 @@ class CommManager(
     @Volatile private var sessionReachedHandshake = false
     @Volatile private var starvedSessionStreak = 0
 
+    /** Sessions in a row that completed the handshake and then carried no video. */
+    val starvedSessions: Int get() = starvedSessionStreak
+
     private val _backgroundNotification = BackgroundNotification(context)
 
     /** Public read-only view of [_connectionState]. */

@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
 import android.app.UiModeManager
+import android.bluetooth.BluetoothAdapter
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -280,6 +281,21 @@ class AapService : Service(), UsbReceiver.Listener {
                     MediaButtonReceiver.handleIntent(it, intent)
                 }
             }
+        }
+    }
+
+    /** Arms Native AA as soon as Bluetooth comes on, instead of waiting for the phone's ACL. */
+    private val btStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+            if (state != BluetoothAdapter.STATE_ON) return
+            val rearm = NativeArmPolicy.shouldRearmOnBtOn(
+                App.provide(context).settings.wifiConnectionMode,
+                nativeAaHandshakeManager?.isActive() == true,
+                commManager.isBusy
+            )
+            AppLog.i("AapService: Bluetooth on — ${if (rearm) "arming Native AA" else "nothing to arm"}")
+            if (rearm) initWifiMode(force = true)
         }
     }
 
@@ -921,6 +937,7 @@ class AapService : Service(), UsbReceiver.Listener {
                         // handshake still runs onDisconnected and re-arms the wireless listeners.
                         hasEverConnected = true
                         onConnected()
+                        releaseBootWakeLockIfSettled()
                     }
                     is CommManager.ConnectionState.HandshakeComplete -> {
                         automaticReconnectAttempts = 0
@@ -1389,6 +1406,9 @@ class AapService : Service(), UsbReceiver.Listener {
                     nativeAaHandshakeManager?.stop()
                     serviceScope.launch {
                         delay(1500) // Give hardware time to settle before re-initializing P2P
+                        if (!commManager.isBusy && !preemptingWirelessForUsb && !isSwitchingToAccessory.get()) {
+                            restartHotspotIfStarved(settings)
+                        }
                         if (commManager.isBusy) {
                             // The phone reconnects within ~300 ms; re-initialising now would tear
                             // down the Bluetooth handshake server under the new session.
@@ -1684,6 +1704,12 @@ class AapService : Service(), UsbReceiver.Listener {
             ContextCompat.RECEIVER_EXPORTED
         )
         AppLog.i("Registered wake detection receiver (${wakeFilter.countActions()} actions)")
+
+        ContextCompat.registerReceiver(
+            this, btStateReceiver,
+            IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+            ContextCompat.RECEIVER_EXPORTED
+        )
     }
 
     private fun registerNetworkMonitor() {
@@ -1922,7 +1948,11 @@ class AapService : Service(), UsbReceiver.Listener {
                 if (externalBt != null) AppLog.e(externalBt)
                 val blockedByExternalBt =
                     externalBt != null && !NativeAaHandshakeManager.externalBtOverridden(this)
-                if (!blockedByExternalBt) {
+                // Same reasoning with the adapter off (every car standby wake); btStateReceiver
+                // re-arms when it comes on.
+                val btEnabled = isBluetoothEnabled()
+                if (!btEnabled) AppLog.i("AapService: Bluetooth is off — Native AA stays down until it comes on.")
+                if (NativeArmPolicy.shouldArm(btEnabled, blockedByExternalBt)) {
                     if (nativeTransport() == NativeTransport.LOCAL_HOTSPOT) {
                         localHotspotCredentialsProvider?.start()
                     } else if (nativeTransport() == NativeTransport.HOTSPOT) {
@@ -1950,6 +1980,14 @@ class AapService : Service(), UsbReceiver.Listener {
         activeWifiMode = mode
         activeHelperStrategy = strategy
         activeNativeTransport = nativeTransport()
+        releaseBootWakeLockIfSettled()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun isBluetoothEnabled(): Boolean = try {
+        BluetoothHelper.getBluetoothAdapter(this)?.isEnabled == true
+    } catch (e: Exception) {
+        false
     }
 
     private fun acquireWifiLock() {
@@ -1991,6 +2029,16 @@ class AapService : Service(), UsbReceiver.Listener {
             val exempt = pm.isIgnoringBatteryOptimizations(packageName)
             AppLog.i("Battery optimization exempt: $exempt")
         }
+    }
+
+    private fun releaseBootWakeLockIfSettled() {
+        if (bootWakeLock?.isHeld != true) return
+        val settled = BootWakeLockPolicy.canRelease(
+            wirelessInitialised = activeWifiMode != -1,
+            usbSwitching = isSwitchingToAccessory.get(),
+            connecting = commManager.connectionState.value is CommManager.ConnectionState.Connecting
+        )
+        if (settled) releaseBootWakeLock()
     }
 
     private fun releaseBootWakeLock() {
@@ -2079,6 +2127,7 @@ class AapService : Service(), UsbReceiver.Listener {
         try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(mediaButtonReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(wakeDetectReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(btStateReceiver) } catch (_: Exception) {}
         try { App.provide(this).carKeysManager.unregisterReceivers() } catch (e: Exception) { AppLog.w("AapService: Error unregistering carKeysManager: ${e.message}") }
         try { wifiAutoStartReceiver?.let { unregisterReceiver(it) } } catch (_: Exception) {}
         try {
@@ -2217,12 +2266,10 @@ class AapService : Service(), UsbReceiver.Listener {
                         AppLog.i("AapService: Bluetooth auto-start — switching wifi mode to Native AA")
                         settings.wifiConnectionMode = 3
                     }
-                    if (!mac.isNullOrEmpty()) {
-                        AppLog.i("AapService: Bluetooth auto-start — poking $mac")
-                        scheduleNativeAaPoke(mac, reason = "bt auto-start")
-                    } else {
-                        scheduleNativeAaArm(reason = "bt auto-start")
-                    }
+                    // Arm only: the phone's ACL being up means it is awake, and a poke here can
+                    // take its hands-free slot.
+                    AppLog.i("AapService: Bluetooth auto-start from $mac — arming Native AA")
+                    scheduleNativeAaArm(reason = "bt auto-start")
                 }
             }
             ACTION_NEARBY_CONNECT         -> {
@@ -2262,6 +2309,7 @@ class AapService : Service(), UsbReceiver.Listener {
                 }
             }
         }
+        releaseBootWakeLockIfSettled()
         return START_STICKY
     }
 
@@ -2270,7 +2318,7 @@ class AapService : Service(), UsbReceiver.Listener {
     // -------------------------------------------------------------------------
 
     override fun onUsbAttach(device: UsbDevice) {
-        if (!UsbDeviceCompat.isAndroidDevice(device)) {
+        if (!isPhoneCandidate(device)) {
             AppLog.i("Ignoring non-Android USB device attached in service (VID: ${device.vendorId}): ${device.deviceName}")
             return
         }
@@ -2327,7 +2375,7 @@ class AapService : Service(), UsbReceiver.Listener {
     }
 
     override fun onUsbPermission(granted: Boolean, connect: Boolean, device: UsbDevice) {
-        if (!UsbDeviceCompat.isAndroidDevice(device)) {
+        if (!isPhoneCandidate(device)) {
             AppLog.i("Ignoring USB permission callback for non-Android device (VID: ${device.vendorId}): ${device.deviceName}")
             return
         }
@@ -2457,8 +2505,22 @@ class AapService : Service(), UsbReceiver.Listener {
         // USB projection already running — leave it alone.
         if (commManager.isConnected && !commManager.isWirelessSession) return
 
+        val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+        val deviceList = usbManager.deviceList.values.filter { isPhoneCandidate(it) }
+
         if (commManager.isBusy) {
             if (!force) return
+            val allowed = settings.allowedDevices
+            val candidates = deviceList.map {
+                UsbTargetPolicy.UsbCandidate(
+                    it.vendorId, it.productId, UsbDeviceCompat.isInAccessoryMode(it),
+                    allowed.contains(UsbDeviceCompat(it).uniqueName)
+                )
+            }
+            if (!UsbTargetPolicy.hasTarget(candidates, lastSession, usbAutoStart, singleUsb, allowed.isNotEmpty(), force)) {
+                AppLog.i("AapService: No USB phone to connect — leaving the wireless session alone.")
+                return
+            }
             if (afterWirelessPreempt) {
                 AppLog.w("AapService: Still busy after wireless preempt — skipping USB this pass.")
                 preemptingWirelessForUsb = false
@@ -2482,9 +2544,6 @@ class AapService : Service(), UsbReceiver.Listener {
             }
             return
         }
-
-        val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
-        val deviceList = usbManager.deviceList.values.filter { UsbDeviceCompat.isAndroidDevice(it) }
 
         // Check for devices already in accessory mode first.
         // After AOA switch the device re-enumerates and appears as a new USB device — we must
@@ -2582,6 +2641,23 @@ class AapService : Service(), UsbReceiver.Listener {
             }
         }
     }
+
+    /** Sessions keep ending with no video: give the phone a fresh access point before re-arming. */
+    private suspend fun restartHotspotIfStarved(settings: Settings) {
+        val appOwnsHotspot = nativeTransport() == NativeTransport.HOTSPOT &&
+            settings.autoEnableHotspot && !settings.hotspotTeardownProvenUnsafe
+        val streak = commManager.starvedSessions
+        if (!VideoStarvationPolicy.shouldRestartHotspot(streak, appOwnsHotspot)) return
+        AppLog.w("AapService: $streak sessions in a row ended without video — restarting the hotspot before re-arming.")
+        // Stopped first so it does not treat the restart as the AP failing; initWifiMode() restarts it.
+        softApCredentialsProvider?.stop()
+        if (!withContext(Dispatchers.IO) { HotspotManager.restart(this@AapService) }) {
+            settings.hotspotTeardownProvenUnsafe = true
+        }
+    }
+
+    private fun isPhoneCandidate(device: UsbDevice): Boolean =
+        UsbDeviceCompat.isAndroidDevice(device) && !UsbTargetPolicy.isCarModem(device.vendorId, device.productId)
 
     private fun performSingleUsbConnect(device: UsbDevice) {
         val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
