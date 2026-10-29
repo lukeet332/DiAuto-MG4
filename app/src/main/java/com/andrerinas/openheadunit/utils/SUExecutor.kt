@@ -85,6 +85,11 @@ class SUExecutor {
             return false
         }
 
+        if (!isSafeProp(key, value)) {
+            Log.e("SUExecutor", "#setProp refused: unsafe key or value")
+            return false
+        }
+
         val exitCode = active?.runShell("setprop $key $value") ?: -1
         return exitCode == 0
     }
@@ -259,5 +264,13 @@ class SUExecutor {
                 Shizuku.unbindUserService(args, this, true)
             }
         }
+    }
+
+    companion object {
+        private val PROP_KEY = Regex("^[A-Za-z0-9._-]+$")
+        private val PROP_VALUE = Regex("^[A-Za-z0-9._:,/@+=-]*$")
+
+        /** setprop runs through a root shell, so only characters that cannot start another command pass. */
+        fun isSafeProp(key: String, value: String): Boolean = PROP_KEY.matches(key) && PROP_VALUE.matches(value)
     }
 }

@@ -3804,9 +3804,6 @@ class AapService : Service(), UsbReceiver.Listener {
      */
     private fun ensureHeadunitServerHotspot() {
         if (!App.provide(this).settings.autoEnableHotspot) return
-        // Same rule as initWifiMode(): while the boot-loop guard has wireless paused, bringing the
-        // access point up would invite the phone straight back into the crash it guards against.
-        if (Settings.isWirelessPausedByBootLoop(this)) return
         Thread {
             AppLog.i("AapService: Auto-enabling hotspot for Headunit Server mode...")
             HotspotManager.setHotspotEnabled(this, true)
