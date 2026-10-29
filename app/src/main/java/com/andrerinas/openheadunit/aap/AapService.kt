@@ -937,6 +937,7 @@ class AapService : Service(), UsbReceiver.Listener {
                         // handshake still runs onDisconnected and re-arms the wireless listeners.
                         hasEverConnected = true
                         onConnected()
+                        releaseBootWakeLockIfSettled()
                     }
                     is CommManager.ConnectionState.HandshakeComplete -> {
                         automaticReconnectAttempts = 0
@@ -1976,6 +1977,7 @@ class AapService : Service(), UsbReceiver.Listener {
         activeWifiMode = mode
         activeHelperStrategy = strategy
         activeNativeTransport = nativeTransport()
+        releaseBootWakeLockIfSettled()
     }
 
     @SuppressLint("MissingPermission")
@@ -2024,6 +2026,16 @@ class AapService : Service(), UsbReceiver.Listener {
             val exempt = pm.isIgnoringBatteryOptimizations(packageName)
             AppLog.i("Battery optimization exempt: $exempt")
         }
+    }
+
+    private fun releaseBootWakeLockIfSettled() {
+        if (bootWakeLock?.isHeld != true) return
+        val settled = BootWakeLockPolicy.canRelease(
+            wirelessInitialised = activeWifiMode != -1,
+            usbSwitching = isSwitchingToAccessory.get(),
+            connecting = commManager.connectionState.value is CommManager.ConnectionState.Connecting
+        )
+        if (settled) releaseBootWakeLock()
     }
 
     private fun releaseBootWakeLock() {
@@ -2296,6 +2308,7 @@ class AapService : Service(), UsbReceiver.Listener {
                 }
             }
         }
+        releaseBootWakeLockIfSettled()
         return START_STICKY
     }
 
