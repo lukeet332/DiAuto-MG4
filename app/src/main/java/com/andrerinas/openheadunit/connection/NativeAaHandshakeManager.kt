@@ -851,7 +851,19 @@ class NativeAaHandshakeManager(
             // The user asking to try again is the way out of a handshake backoff — it is the only
             // gesture the UI offers, and it means they want another attempt whatever we concluded.
             resetHandshakeBackoff()
-            
+
+            // Same guard as the retry loop: a poke mid-exchange or mid-join takes the radio from it.
+            val settling = isHandoffSettling()
+            val handshaking = isHandshakeInFlight()
+            val sessionUp = commManager.isConnected ||
+                commManager.connectionState.value is CommManager.ConnectionState.Connecting
+            if (!NativeHandoffPolicy.shouldPoke(settling, handshaking, sessionUp)) {
+                AppLog.i("NativeAA: Not running the manual poke (settling=$settling, handshake=$handshaking, session=$sessionUp).")
+                return
+            }
+
+            // Put the 15 s retry loop back afterwards; a cancelled manual poke means something else took over.
+            val resumeRetryLoop = pokeJob?.isActive == true
             pokeJob?.cancel()
             pokeJob = scope.launch(Dispatchers.IO + CoroutineName("NativeAa-ManualWakeup")) {
                 // Pre-flight: Ensure WiFi credentials (SSID/IP) are ready before connecting RFCOMM to phone.
@@ -869,6 +881,8 @@ class NativeAaHandshakeManager(
                 AppLog.i("NativeAA: Attempting manual poke to ${device.name}...")
                 pokeDevice(device, holdMs = 20000)
                 AppLog.i("NativeAA: Manual poke to ${device.name} finished.")
+            }.also { job ->
+                if (resumeRetryLoop) job.invokeOnCompletion { cause -> if (cause == null) triggerPoke() }
             }
         } catch (e: Exception) {
             AppLog.e("NativeAA: Manual poke error", e)
@@ -1375,6 +1389,10 @@ class NativeAaHandshakeManager(
                 tick(250)
             }
 
+        } catch (e: CancellationException) {
+            // Superseded or stopped; already logged by whoever cancelled it.
+            AppLog.d("NativeAA: Handshake cancelled: ${e.message}")
+            throw e
         } catch (e: Exception) {
             AppLog.e("NativeAA: Handshake error: ${e.message}", e)
         } finally {
