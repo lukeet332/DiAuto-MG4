@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
 import android.app.UiModeManager
+import android.bluetooth.BluetoothAdapter
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -280,6 +281,21 @@ class AapService : Service(), UsbReceiver.Listener {
                     MediaButtonReceiver.handleIntent(it, intent)
                 }
             }
+        }
+    }
+
+    /** Arms Native AA as soon as Bluetooth comes on, instead of waiting for the phone's ACL. */
+    private val btStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+            if (state != BluetoothAdapter.STATE_ON) return
+            val rearm = NativeArmPolicy.shouldRearmOnBtOn(
+                App.provide(context).settings.wifiConnectionMode,
+                nativeAaHandshakeManager?.isActive() == true,
+                commManager.isBusy
+            )
+            AppLog.i("AapService: Bluetooth on — ${if (rearm) "arming Native AA" else "nothing to arm"}")
+            if (rearm) initWifiMode(force = true)
         }
     }
 
@@ -1684,6 +1700,12 @@ class AapService : Service(), UsbReceiver.Listener {
             ContextCompat.RECEIVER_EXPORTED
         )
         AppLog.i("Registered wake detection receiver (${wakeFilter.countActions()} actions)")
+
+        ContextCompat.registerReceiver(
+            this, btStateReceiver,
+            IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+            ContextCompat.RECEIVER_EXPORTED
+        )
     }
 
     private fun registerNetworkMonitor() {
@@ -1922,7 +1944,11 @@ class AapService : Service(), UsbReceiver.Listener {
                 if (externalBt != null) AppLog.e(externalBt)
                 val blockedByExternalBt =
                     externalBt != null && !NativeAaHandshakeManager.externalBtOverridden(this)
-                if (!blockedByExternalBt) {
+                // Same reasoning with the adapter off (every car standby wake); btStateReceiver
+                // re-arms when it comes on.
+                val btEnabled = isBluetoothEnabled()
+                if (!btEnabled) AppLog.i("AapService: Bluetooth is off — Native AA stays down until it comes on.")
+                if (NativeArmPolicy.shouldArm(btEnabled, blockedByExternalBt)) {
                     if (nativeTransport() == NativeTransport.LOCAL_HOTSPOT) {
                         localHotspotCredentialsProvider?.start()
                     } else if (nativeTransport() == NativeTransport.HOTSPOT) {
@@ -1950,6 +1976,13 @@ class AapService : Service(), UsbReceiver.Listener {
         activeWifiMode = mode
         activeHelperStrategy = strategy
         activeNativeTransport = nativeTransport()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun isBluetoothEnabled(): Boolean = try {
+        BluetoothHelper.getBluetoothAdapter(this)?.isEnabled == true
+    } catch (e: Exception) {
+        false
     }
 
     private fun acquireWifiLock() {
@@ -2079,6 +2112,7 @@ class AapService : Service(), UsbReceiver.Listener {
         try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(mediaButtonReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(wakeDetectReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(btStateReceiver) } catch (_: Exception) {}
         try { App.provide(this).carKeysManager.unregisterReceivers() } catch (e: Exception) { AppLog.w("AapService: Error unregistering carKeysManager: ${e.message}") }
         try { wifiAutoStartReceiver?.let { unregisterReceiver(it) } } catch (_: Exception) {}
         try {
