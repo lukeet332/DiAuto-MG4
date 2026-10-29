@@ -41,6 +41,16 @@ object DecoderStopPolicy {
     fun isDecoderRestart(reason: String): Boolean = reason.startsWith(RESTART_PREFIX)
 
     /**
+     * True when [reason] means the surface itself is going away. It keeps reporting isValid until
+     * it is actually released, so the decoder must not restart on it in that window.
+     */
+    fun retiresSurface(reason: String): Boolean = reason == REASON_SURFACE_DESTROYED
+
+    /** Whether decode() may build a decoder on the current surface. */
+    fun canStartOn(surfaceValid: Boolean, surfaceRetired: Boolean): Boolean =
+        surfaceValid && !surfaceRetired
+
+    /**
      * True when [reason] means the phone has gone away and every piece of session state should be
      * reset. False for the decoder's own restarts and for the surface lifecycle, where the stream
      * outlives the decoder.
