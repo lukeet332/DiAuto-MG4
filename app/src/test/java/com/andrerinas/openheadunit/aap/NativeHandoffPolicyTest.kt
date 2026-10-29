@@ -111,6 +111,7 @@ class NativeHandoffPolicyTest {
             NativeHandoffPolicy.shouldKeepExistingHandshake(
                 previousJobActive = true,
                 credentialsReady = false,
+                previousPeerAlive = true,
                 previousStartedAtMs = 1_000L,
                 nowMs = 1_000L + 5_000L,
             )
@@ -123,6 +124,7 @@ class NativeHandoffPolicyTest {
             NativeHandoffPolicy.shouldKeepExistingHandshake(
                 previousJobActive = true,
                 credentialsReady = true,
+                previousPeerAlive = true,
                 previousStartedAtMs = 1_000L,
                 nowMs = 1_000L + 5_000L,
             )
@@ -135,6 +137,21 @@ class NativeHandoffPolicyTest {
             NativeHandoffPolicy.shouldKeepExistingHandshake(
                 previousJobActive = false,
                 credentialsReady = false,
+                previousPeerAlive = true,
+                previousStartedAtMs = 1_000L,
+                nowMs = 1_000L + 5_000L,
+            )
+        )
+    }
+
+    @Test
+    fun `a handshake whose phone has already left never blocks the newest socket`() {
+        // 29 Oct: the phone gave up at +12-17 s and the dead wait refused 1491 reconnects.
+        assertFalse(
+            NativeHandoffPolicy.shouldKeepExistingHandshake(
+                previousJobActive = true,
+                credentialsReady = false,
+                previousPeerAlive = false,
                 previousStartedAtMs = 1_000L,
                 nowMs = 1_000L + 5_000L,
             )
@@ -269,11 +286,55 @@ class NativeHandoffPolicyTest {
     }
 
     @Test
-    fun `with no paired phone yet the poke keeps trying for a minute instead of giving up`() {
+    fun `with no paired phone yet the poke looks quickly for a minute`() {
         // MG4 boot, 2026-10-19: the bond list was empty at the one poke and DiAuto never tried
         // again, so the phone waited five minutes for a manual reconnect.
-        org.junit.Assert.assertTrue(NativeHandoffPolicy.keepPokingWithoutDevices(emptyRounds = 1))
-        org.junit.Assert.assertTrue(NativeHandoffPolicy.keepPokingWithoutDevices(emptyRounds = 19))
-        org.junit.Assert.assertFalse(NativeHandoffPolicy.keepPokingWithoutDevices(emptyRounds = 20))
+        assertEquals(3_000L, NativeHandoffPolicy.emptyRoundDelayMs(emptyRounds = 1))
+        assertEquals(3_000L, NativeHandoffPolicy.emptyRoundDelayMs(emptyRounds = 19))
+    }
+
+    @Test
+    fun `after a minute without a paired phone the poke slows down but never gives up`() {
+        // 25 Oct drive 2: the loop gave up after 20 empty rounds and the user's tile tap did nothing.
+        assertEquals(15_000L, NativeHandoffPolicy.emptyRoundDelayMs(emptyRounds = 20))
+        assertEquals(15_000L, NativeHandoffPolicy.emptyRoundDelayMs(emptyRounds = 10_000))
+    }
+
+    // --- the phone hanging up the held Bluetooth channel ---
+
+    private val stall = NativeHandoffPolicy.PEER_CLOSE_STALL_MS
+
+    private fun endsOnClose(
+        peerClosed: Boolean = true,
+        sessionConnected: Boolean = true,
+        lastFrameRenderedMs: Long = 1_000L,
+        nowMs: Long = 1_000L + stall,
+    ) = NativeHandoffPolicy.shouldEndSessionOnPeerClose(peerClosed, sessionConnected, lastFrameRenderedMs, nowMs)
+
+    /** 5 mid-drive drops: video already at 0 fps, the read timeout declared it 6-10 s later. */
+    @Test
+    fun `the phone hanging up with video stalled ends the session now`() {
+        assertTrue(endsOnClose())
+    }
+
+    @Test
+    fun `video still flowing keeps the session whatever Bluetooth does`() {
+        assertFalse(endsOnClose(nowMs = 1_000L + stall - 1))
+    }
+
+    /** Nothing rendered since the surface was set is no evidence the stream is alive. */
+    @Test
+    fun `no frame rendered at all counts as stalled`() {
+        assertTrue(endsOnClose(lastFrameRenderedMs = 0L, nowMs = 1_000L))
+    }
+
+    @Test
+    fun `a release we caused ourselves never ends the session`() {
+        assertFalse(endsOnClose(peerClosed = false))
+    }
+
+    @Test
+    fun `with no session up there is nothing to end`() {
+        assertFalse(endsOnClose(sessionConnected = false))
     }
 }

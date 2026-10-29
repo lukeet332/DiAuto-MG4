@@ -135,6 +135,7 @@ class NativeAaHandshakeManager(
 
     private val settings = com.andrerinas.openheadunit.App.provide(context).settings
     private val commManager = com.andrerinas.openheadunit.App.provide(context).commManager
+    private val videoDecoder = com.andrerinas.openheadunit.App.provide(context).videoDecoder
     private var aaServerSocket: BluetoothServerSocket? = null
     private var hfpServerSocket: BluetoothServerSocket? = null
     // Extra RFCOMM listeners opened on secondary Bluetooth radios (dual-Bluetooth head units).
@@ -205,6 +206,9 @@ class NativeAaHandshakeManager(
     // minutes. Cancelling cannot break a blocking JNI read either, but it does end every real
     // suspension point in the handshake. Do both; whichever the stack honours wins.
     @Volatile private var activeHandshakeJob: Job? = null
+    // False once [activeHandshakeSocket]'s reader has seen the channel end, so a dead handshake
+    // can never hold the listener against the phone's reconnects.
+    @Volatile private var activeHandshakePeerAlive = true
     // Name of the primary Bluetooth radio we listen and poke on, captured in start(). A field
     // rather than a local so the diagnostic below can name the radio the phone is ignoring.
     @Volatile private var localRadioName: String = "?"
@@ -721,6 +725,9 @@ class NativeAaHandshakeManager(
             delay(2000) // Small safety delay before connecting
 
             var emptyRounds = 0
+            // When each stored MAC started reading NOT_BONDED. Local, so a restarted loop starts
+            // over; uptime, so a deep sleep never counts towards forgetting a phone.
+            val notBondedSince = mutableMapOf<String, Long>()
             while (isRunning && isActive) {
                 val settling = isHandoffSettling()
                 val handshaking = isHandshakeInFlight()
@@ -741,12 +748,15 @@ class NativeAaHandshakeManager(
                     // rather than an adapter that happened to be off. Both rules are in the policy.
                     val bonded = mutableListOf<BluetoothDevice>()
                     val staleMacs = mutableSetOf<String>()
+                    val now = SystemClock.uptimeMillis()
                     lastMacs.forEach { mac ->
                         val reading = bondReadingFor(adapter, mac)
                         if (BluetoothWakePolicy.mayPoke(reading)) {
                             try { bonded.add(adapter.getRemoteDevice(mac)) } catch (e: Exception) {}
                         }
-                        if (BluetoothWakePolicy.shouldForget(reading)) staleMacs.add(mac)
+                        val since = BluetoothWakePolicy.notBondedSince(reading, notBondedSince[mac] ?: 0L, now)
+                        notBondedSince[mac] = since
+                        if (BluetoothWakePolicy.shouldForget(reading, since, now)) staleMacs.add(mac)
                     }
                     if (staleMacs.isNotEmpty()) {
                         AppLog.w("NativeAA: Dropping Auto Start BT MAC(s) no longer paired: $staleMacs")
@@ -762,12 +772,11 @@ class NativeAaHandshakeManager(
 
                 if (devicesToPoke.isEmpty()) {
                     emptyRounds++
-                    if (!NativeHandoffPolicy.keepPokingWithoutDevices(emptyRounds)) {
-                        AppLog.w("NativeAA: No paired Bluetooth devices found to poke after $emptyRounds tries - giving up.")
-                        return@launch
-                    }
                     if (emptyRounds == 1) AppLog.w("NativeAA: No paired Bluetooth devices found to poke yet - retrying while Bluetooth settles.")
-                    delay(3000)
+                    if (emptyRounds == NativeHandoffPolicy.NO_DEVICE_POKE_ROUNDS) {
+                        AppLog.w("NativeAA: No paired Bluetooth devices found to poke after $emptyRounds tries - retrying every 15s.")
+                    }
+                    delay(NativeHandoffPolicy.emptyRoundDelayMs(emptyRounds))
                     continue
                 }
                 if (emptyRounds > 0) AppLog.i("NativeAA: Paired device found after $emptyRounds empty look(s).")
@@ -842,7 +851,19 @@ class NativeAaHandshakeManager(
             // The user asking to try again is the way out of a handshake backoff — it is the only
             // gesture the UI offers, and it means they want another attempt whatever we concluded.
             resetHandshakeBackoff()
-            
+
+            // Same guard as the retry loop: a poke mid-exchange or mid-join takes the radio from it.
+            val settling = isHandoffSettling()
+            val handshaking = isHandshakeInFlight()
+            val sessionUp = commManager.isConnected ||
+                commManager.connectionState.value is CommManager.ConnectionState.Connecting
+            if (!NativeHandoffPolicy.shouldPoke(settling, handshaking, sessionUp)) {
+                AppLog.i("NativeAA: Not running the manual poke (settling=$settling, handshake=$handshaking, session=$sessionUp).")
+                return
+            }
+
+            // Put the 15 s retry loop back afterwards; a cancelled manual poke means something else took over.
+            val resumeRetryLoop = pokeJob?.isActive == true
             pokeJob?.cancel()
             pokeJob = scope.launch(Dispatchers.IO + CoroutineName("NativeAa-ManualWakeup")) {
                 // Pre-flight: Ensure WiFi credentials (SSID/IP) are ready before connecting RFCOMM to phone.
@@ -860,6 +881,8 @@ class NativeAaHandshakeManager(
                 AppLog.i("NativeAA: Attempting manual poke to ${device.name}...")
                 pokeDevice(device, holdMs = 20000)
                 AppLog.i("NativeAA: Manual poke to ${device.name} finished.")
+            }.also { job ->
+                if (resumeRetryLoop) job.invokeOnCompletion { cause -> if (cause == null) triggerPoke() }
             }
         } catch (e: Exception) {
             AppLog.e("NativeAA: Manual poke error", e)
@@ -940,6 +963,7 @@ class NativeAaHandshakeManager(
             NativeHandoffPolicy.shouldKeepExistingHandshake(
                 previousJobActive = previousJob?.isActive == true,
                 credentialsReady = credentials != null,
+                previousPeerAlive = activeHandshakePeerAlive,
                 previousStartedAtMs = previousStartedAt,
                 nowMs = SystemClock.elapsedRealtime(),
             )
@@ -957,6 +981,7 @@ class NativeAaHandshakeManager(
         // ownership first and the fence is already closed when the old one unwinds.
         activeHandshakeSocket = socket
         activeHandshakeJob = coroutineContext[Job]
+        activeHandshakePeerAlive = true
         // Stamped after claiming ownership above, so a superseded handshake's cleanup — which
         // only fires when it still owns activeHandshakeSocket — can't wipe this one's stamp.
         handshakeStartedAt = SystemClock.elapsedRealtime()
@@ -1021,6 +1046,7 @@ class NativeAaHandshakeManager(
                 } catch (e: Exception) {
                     AppLog.d("NativeAA: Bluetooth reader ended: ${e.message}")
                 } finally {
+                    ifOwner(socket) { activeHandshakePeerAlive = false }
                     inbound.close()
                 }
             }
@@ -1097,6 +1123,16 @@ class NativeAaHandshakeManager(
                             if (action.peerClosed) "NativeAA: the phone closed the held Bluetooth channel."
                             else "NativeAA: the projection session ended; releasing the held Bluetooth channel."
                         )
+                        ifOwner(socket) {
+                            if (NativeHandoffPolicy.shouldEndSessionOnPeerClose(
+                                    action.peerClosed, commManager.isConnected,
+                                    videoDecoder.lastFrameRenderedMs, SystemClock.elapsedRealtime()
+                                )
+                            ) {
+                                AppLog.i("NativeAA: no video for ${NativeHandoffPolicy.PEER_CLOSE_STALL_MS / 1000}s+ and the phone hung up Bluetooth — ending the session now, not at the read timeout.")
+                                commManager.disconnect(sendByeBye = false, isUserExit = false)
+                            }
+                        }
                     }
                     is WppAction.Fail -> {
                         AppLog.w("NativeAA: Handshake failed — ${action.reason}.")
@@ -1185,6 +1221,11 @@ class NativeAaHandshakeManager(
                     }
                     return
                 }
+                if (readerClosed) {
+                    // Before Type 3 this fails the exchange so ownership is released at once.
+                    feed(WppEvent.PeerClosed)
+                    if (session.isTerminal()) return
+                }
                 if (session.stage == WppStage.SETTLING &&
                     (commManager.isConnected ||
                         commManager.connectionState.value is CommManager.ConnectionState.Connecting)) {
@@ -1246,6 +1287,13 @@ class NativeAaHandshakeManager(
                     AppLog.d("NativeAA: Still waiting... credentials=${credentials != null} (${waitedS}s)")
                 }
                 tick(500)
+            }
+
+            if (session.isTerminal()) {
+                // The phone left while we waited; the Fail action has said so. Not counted as a
+                // silent unit, as the full wait ending without credentials never was.
+                abortedLocally = true
+                return@withContext
             }
 
             // Read once. The check and the use used to be separate reads of four separate fields,
@@ -1341,6 +1389,10 @@ class NativeAaHandshakeManager(
                 tick(250)
             }
 
+        } catch (e: CancellationException) {
+            // Superseded or stopped; already logged by whoever cancelled it.
+            AppLog.d("NativeAA: Handshake cancelled: ${e.message}")
+            throw e
         } catch (e: Exception) {
             AppLog.e("NativeAA: Handshake error: ${e.message}", e)
         } finally {

@@ -61,7 +61,8 @@ sealed class WppEvent {
     object StageTimeout : WppEvent()
     /** The phone's projection session reached us over WiFi. */
     object TcpSessionUp : WppEvent()
-    /** The phone closed the held channel. Only acted on in [WppStage.HOLDING]. */
+    /** The phone closed the channel. Fails the exchange before Type 3, releases it in
+     *  [WppStage.HOLDING], and is ignored while settling. */
     object PeerClosed : WppEvent()
     /** The projection session ended. Only acted on in [WppStage.HOLDING]. */
     object SessionEnded : WppEvent()
@@ -200,6 +201,14 @@ class WppHandshakeSession(
             // everywhere, so it never reaches the per-stage logic below and never changes stage.
             if (event.type == WppMessageType.PING_REQUEST) return listOf(WppAction.SendPingResponse)
             if (event.type == WppMessageType.PING_RESPONSE) return emptyList()
+        }
+
+        // Before Type 3 nothing can reach a phone that has hung up; a wait would only hold the
+        // listener's ownership against its reconnects.
+        if (event is WppEvent.PeerClosed &&
+            (stage == WppStage.AWAIT_VERSION || stage == WppStage.AWAIT_CREDENTIALS || stage == WppStage.AWAIT_INFO_REQUEST)
+        ) {
+            return fail("phone left while waiting (closed the Bluetooth channel before the credentials went out)")
         }
 
         return when (stage) {

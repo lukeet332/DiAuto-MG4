@@ -133,21 +133,45 @@ object NativeHandoffPolicy {
      * bringing up a P2P group. Replacing the wait each time cancels the only coroutine that
      * would have delivered Type 3 once credentials appear, and the log fills with
      * "closing the previous session" forever. Once credentials are ready the older rule stands:
-     * a reconnect means the earlier handoff failed, so the new socket wins.
+     * a reconnect means the earlier handoff failed, so the new socket wins. So does it when the
+     * earlier phone has already closed its channel: nothing is left to deliver Type 3 to.
      */
     fun shouldKeepExistingHandshake(
         previousJobActive: Boolean,
         credentialsReady: Boolean,
+        previousPeerAlive: Boolean,
         previousStartedAtMs: Long,
         nowMs: Long,
     ): Boolean =
         previousJobActive &&
+            previousPeerAlive &&
             !credentialsReady &&
             isHandshaking(previousStartedAtMs, nowMs)
 
-    /** Rounds (3 s apart) to keep looking for a paired phone before giving up: about a minute. */
+    /** Rounds (3 s apart) to look quickly for a paired phone before slowing down: about a minute. */
     const val NO_DEVICE_POKE_ROUNDS = 20
 
-    /** At boot the bond list can be empty for a few seconds; one empty look is not "no phone". */
-    fun keepPokingWithoutDevices(emptyRounds: Int): Boolean = emptyRounds < NO_DEVICE_POKE_ROUNDS
+    /**
+     * How long to wait before looking for a paired phone again. At boot the bond list can be empty
+     * for a few seconds, so look quickly at first; after that fall back to the normal retry
+     * cadence rather than giving up, which left nothing to answer a later tap or reconnect.
+     */
+    fun emptyRoundDelayMs(emptyRounds: Int): Long = if (emptyRounds < NO_DEVICE_POKE_ROUNDS) 3_000L else 15_000L
+
+    /** How long video must already have stalled for the phone hanging up Bluetooth to end the session. */
+    const val PEER_CLOSE_STALL_MS = 3_000L
+
+    /**
+     * Whether the phone closing the held Bluetooth channel should end the projection session now
+     * instead of at the 15 s AAP read timeout. No session has survived that close, but a stream
+     * still drawing frames is left alone. [lastFrameRenderedMs] is 0 when nothing has rendered.
+     */
+    fun shouldEndSessionOnPeerClose(
+        peerClosed: Boolean,
+        sessionConnected: Boolean,
+        lastFrameRenderedMs: Long,
+        nowMs: Long,
+    ): Boolean =
+        peerClosed && sessionConnected &&
+            (lastFrameRenderedMs == 0L || nowMs - lastFrameRenderedMs >= PEER_CLOSE_STALL_MS)
 }

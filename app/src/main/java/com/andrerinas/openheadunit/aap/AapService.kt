@@ -3762,7 +3762,11 @@ class AapService : Service(), UsbReceiver.Listener {
                 } catch (e: Exception) {
                     // The cancelled branch used to be silent, which made a server that was torn
                     // down indistinguishable from one that was never started.
-                    if (isActive) AppLog.e("Wireless server error", e)
+                    // A listener closed under accept() at session end is routine and is rebuilt
+                    // within seconds; only a bind failure or anything else is an error.
+                    if (isActive && isListening && e is java.net.SocketException && e !is java.net.BindException) {
+                        AppLog.i("WirelessServer: listener on $hostLabel:${wirelessPort} closed (${e.message}).")
+                    } else if (isActive) AppLog.e("Wireless server error", e)
                     else AppLog.i("WirelessServer: port ${wirelessPort} released (${e.javaClass.simpleName}).")
                 } finally {
                     isListening = false

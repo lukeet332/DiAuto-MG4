@@ -145,6 +145,32 @@ class WppHandshakeSessionTest {
         assertEquals(WppStage.DONE, closed.stage)
     }
 
+    /** 29 Oct: a phone gone at +12 s held a 60 s credential wait, refusing every reconnect. */
+    @Test
+    fun `a phone that closes the channel before the credentials go out fails the handshake`() {
+        val awaitingCredentials = session(versionExchange = false).apply { on(WppEvent.SocketReady) }
+        val awaitingVersion = session().apply { on(WppEvent.SocketReady) }
+        val awaitingInfoRequest = session(versionExchange = false).apply {
+            on(WppEvent.SocketReady)
+            on(WppEvent.CredentialsReady)
+        }
+        for (s in listOf(awaitingCredentials, awaitingVersion, awaitingInfoRequest)) {
+            val actions = s.on(WppEvent.PeerClosed)
+            assertEquals(1, actions.size)
+            assertTrue(actions.single() is WppAction.Fail)
+            assertEquals(WppStage.FAILED, s.stage)
+        }
+    }
+
+    /** It may drop Bluetooth while it associates; the settle deadline still bounds us. */
+    @Test
+    fun `a phone closing the channel while settling is not a failure`() {
+        val s = settledSession()
+
+        assertEquals(emptyList<WppAction>(), s.on(WppEvent.PeerClosed))
+        assertEquals(WppStage.SETTLING, s.stage)
+    }
+
     @Test
     fun `a phone still joining buys itself more time`() {
         val s = settledSession()
