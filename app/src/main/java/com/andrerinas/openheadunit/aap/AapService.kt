@@ -288,6 +288,15 @@ class AapService : Service(), UsbReceiver.Listener {
     private val btStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+            if (state == BluetoothAdapter.STATE_TURNING_OFF) {
+                val mode = App.provide(context).settings.wifiConnectionMode
+                if (NativeArmPolicy.shouldStandDownOnBtOff(mode, commManager.isBusy)) {
+                    AppLog.i("AapService: Bluetooth going off — standing Native AA down until it is back")
+                    nativeAaHandshakeManager?.stop()
+                    softApCredentialsProvider?.stop()
+                }
+                return
+            }
             if (state != BluetoothAdapter.STATE_ON) return
             val rearm = NativeArmPolicy.shouldRearmOnBtOn(
                 App.provide(context).settings.wifiConnectionMode,

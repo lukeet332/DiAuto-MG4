@@ -70,8 +70,8 @@ android {
         applicationId = "com.drivehub.diauto.mg4"
         minSdk = 28
         targetSdk = 36
-        versionCode = 82
-        versionName = "1.9.6-wireless57-60fps"
+        versionCode = 83
+        versionName = "1.9.6-wireless58-60fps"
         setProperty("archivesBaseName", "${applicationId}_${versionName}")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         multiDexEnabled = true

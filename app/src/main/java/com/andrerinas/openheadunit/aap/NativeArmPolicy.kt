@@ -14,4 +14,8 @@ object NativeArmPolicy {
     /** Bluetooth just came on: re-arm a Native AA route left down, but never under a session. */
     fun shouldRearmOnBtOn(wifiConnectionMode: Int, handshakeActive: Boolean, sessionBusy: Boolean): Boolean =
         wifiConnectionMode == 3 && !handshakeActive && !sessionBusy
+
+    /** Bluetooth went off (drive over, car going to sleep): stop the route, but never under a session. */
+    fun shouldStandDownOnBtOff(wifiConnectionMode: Int, sessionBusy: Boolean): Boolean =
+        wifiConnectionMode == 3 && !sessionBusy
 }

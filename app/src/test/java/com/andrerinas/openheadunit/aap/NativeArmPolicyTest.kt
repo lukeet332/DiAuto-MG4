@@ -46,4 +46,20 @@ class NativeArmPolicyTest {
 
     private fun rearm(mode: Int = 3, handshakeActive: Boolean = false, sessionBusy: Boolean = false) =
         NativeArmPolicy.shouldRearmOnBtOn(mode, handshakeActive, sessionBusy)
+
+    @Test
+    fun `stands down when Bluetooth goes off in Native AA mode with no session`() {
+        // End of a drive: without this the hotspot retry loop keeps cycling as the car sleeps.
+        assertTrue(NativeArmPolicy.shouldStandDownOnBtOff(wifiConnectionMode = 3, sessionBusy = false))
+    }
+
+    @Test
+    fun `keeps a live session when Bluetooth goes off`() {
+        assertFalse(NativeArmPolicy.shouldStandDownOnBtOff(wifiConnectionMode = 3, sessionBusy = true))
+    }
+
+    @Test
+    fun `does not stand down other connection modes`() {
+        assertFalse(NativeArmPolicy.shouldStandDownOnBtOff(wifiConnectionMode = 1, sessionBusy = false))
+    }
 }
