@@ -145,9 +145,13 @@ object NativeHandoffPolicy {
             !credentialsReady &&
             isHandshaking(previousStartedAtMs, nowMs)
 
-    /** Rounds (3 s apart) to keep looking for a paired phone before giving up: about a minute. */
+    /** Rounds (3 s apart) to look quickly for a paired phone before slowing down: about a minute. */
     const val NO_DEVICE_POKE_ROUNDS = 20
 
-    /** At boot the bond list can be empty for a few seconds; one empty look is not "no phone". */
-    fun keepPokingWithoutDevices(emptyRounds: Int): Boolean = emptyRounds < NO_DEVICE_POKE_ROUNDS
+    /**
+     * How long to wait before looking for a paired phone again. At boot the bond list can be empty
+     * for a few seconds, so look quickly at first; after that fall back to the normal retry
+     * cadence rather than giving up, which left nothing to answer a later tap or reconnect.
+     */
+    fun emptyRoundDelayMs(emptyRounds: Int): Long = if (emptyRounds < NO_DEVICE_POKE_ROUNDS) 3_000L else 15_000L
 }

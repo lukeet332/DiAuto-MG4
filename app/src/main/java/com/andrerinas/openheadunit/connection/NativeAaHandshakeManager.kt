@@ -721,6 +721,9 @@ class NativeAaHandshakeManager(
             delay(2000) // Small safety delay before connecting
 
             var emptyRounds = 0
+            // When each stored MAC started reading NOT_BONDED. Local, so a restarted loop starts
+            // over; uptime, so a deep sleep never counts towards forgetting a phone.
+            val notBondedSince = mutableMapOf<String, Long>()
             while (isRunning && isActive) {
                 val settling = isHandoffSettling()
                 val handshaking = isHandshakeInFlight()
@@ -741,12 +744,15 @@ class NativeAaHandshakeManager(
                     // rather than an adapter that happened to be off. Both rules are in the policy.
                     val bonded = mutableListOf<BluetoothDevice>()
                     val staleMacs = mutableSetOf<String>()
+                    val now = SystemClock.uptimeMillis()
                     lastMacs.forEach { mac ->
                         val reading = bondReadingFor(adapter, mac)
                         if (BluetoothWakePolicy.mayPoke(reading)) {
                             try { bonded.add(adapter.getRemoteDevice(mac)) } catch (e: Exception) {}
                         }
-                        if (BluetoothWakePolicy.shouldForget(reading)) staleMacs.add(mac)
+                        val since = BluetoothWakePolicy.notBondedSince(reading, notBondedSince[mac] ?: 0L, now)
+                        notBondedSince[mac] = since
+                        if (BluetoothWakePolicy.shouldForget(reading, since, now)) staleMacs.add(mac)
                     }
                     if (staleMacs.isNotEmpty()) {
                         AppLog.w("NativeAA: Dropping Auto Start BT MAC(s) no longer paired: $staleMacs")
@@ -762,12 +768,11 @@ class NativeAaHandshakeManager(
 
                 if (devicesToPoke.isEmpty()) {
                     emptyRounds++
-                    if (!NativeHandoffPolicy.keepPokingWithoutDevices(emptyRounds)) {
-                        AppLog.w("NativeAA: No paired Bluetooth devices found to poke after $emptyRounds tries - giving up.")
-                        return@launch
-                    }
                     if (emptyRounds == 1) AppLog.w("NativeAA: No paired Bluetooth devices found to poke yet - retrying while Bluetooth settles.")
-                    delay(3000)
+                    if (emptyRounds == NativeHandoffPolicy.NO_DEVICE_POKE_ROUNDS) {
+                        AppLog.w("NativeAA: No paired Bluetooth devices found to poke after $emptyRounds tries - retrying every 15s.")
+                    }
+                    delay(NativeHandoffPolicy.emptyRoundDelayMs(emptyRounds))
                     continue
                 }
                 if (emptyRounds > 0) AppLog.i("NativeAA: Paired device found after $emptyRounds empty look(s).")

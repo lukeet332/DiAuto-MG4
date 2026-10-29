@@ -269,11 +269,17 @@ class NativeHandoffPolicyTest {
     }
 
     @Test
-    fun `with no paired phone yet the poke keeps trying for a minute instead of giving up`() {
+    fun `with no paired phone yet the poke looks quickly for a minute`() {
         // MG4 boot, 2026-10-19: the bond list was empty at the one poke and DiAuto never tried
         // again, so the phone waited five minutes for a manual reconnect.
-        org.junit.Assert.assertTrue(NativeHandoffPolicy.keepPokingWithoutDevices(emptyRounds = 1))
-        org.junit.Assert.assertTrue(NativeHandoffPolicy.keepPokingWithoutDevices(emptyRounds = 19))
-        org.junit.Assert.assertFalse(NativeHandoffPolicy.keepPokingWithoutDevices(emptyRounds = 20))
+        assertEquals(3_000L, NativeHandoffPolicy.emptyRoundDelayMs(emptyRounds = 1))
+        assertEquals(3_000L, NativeHandoffPolicy.emptyRoundDelayMs(emptyRounds = 19))
+    }
+
+    @Test
+    fun `after a minute without a paired phone the poke slows down but never gives up`() {
+        // 25 Oct drive 2: the loop gave up after 20 empty rounds and the user's tile tap did nothing.
+        assertEquals(15_000L, NativeHandoffPolicy.emptyRoundDelayMs(emptyRounds = 20))
+        assertEquals(15_000L, NativeHandoffPolicy.emptyRoundDelayMs(emptyRounds = 10_000))
     }
 }

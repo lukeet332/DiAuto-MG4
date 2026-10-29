@@ -94,6 +94,12 @@ class BluetoothWakePolicyTest {
         }
     }
 
+    private val window = BluetoothWakePolicy.FORGET_AFTER_NOT_BONDED_MS
+
+    /** Forgets [reading] only if it was the whole time since [sinceMs]; a long streak by default. */
+    private fun forgets(reading: BluetoothWakePolicy.BondReading, sinceMs: Long = 1_000L, nowMs: Long = 1_000L + window) =
+        BluetoothWakePolicy.shouldForget(reading, sinceMs, nowMs)
+
     /**
      * The one that matters: `getBondState()` answers BOND_NONE when the Bluetooth service is
      * unavailable, so an adapter that is off looks exactly like a phone the user unpaired. Forgetting
@@ -101,23 +107,59 @@ class BluetoothWakePolicyTest {
      */
     @Test
     fun `an unreadable state is never forgotten`() {
-        assertFalse(BluetoothWakePolicy.shouldForget(UNREADABLE))
+        assertFalse(forgets(UNREADABLE))
     }
 
     @Test
     fun `a paired device is never forgotten`() {
-        assertFalse(BluetoothWakePolicy.shouldForget(BONDED))
+        assertFalse(forgets(BONDED))
+    }
+
+    /**
+     * 25 Oct 13:03: one BOND_NONE read 3 s after the phone's ACL deleted the MAC, and with it ACL
+     * auto-start and the poke for three drives. The car's stack says this for up to a minute after
+     * Bluetooth comes on.
+     */
+    @Test
+    fun `a single not-paired reading is never forgotten`() {
+        val now = 50_000L
+        val since = BluetoothWakePolicy.notBondedSince(NOT_BONDED, sinceMs = 0L, nowMs = now)
+        assertFalse(BluetoothWakePolicy.shouldForget(NOT_BONDED, since, now))
     }
 
     @Test
-    fun `a positive not-paired answer is forgotten`() {
-        assertTrue(BluetoothWakePolicy.shouldForget(NOT_BONDED))
+    fun `not-paired for less than the window is kept`() {
+        assertFalse(forgets(NOT_BONDED, sinceMs = 1_000L, nowMs = 1_000L + window - 1))
+    }
+
+    @Test
+    fun `not-paired across the whole window is forgotten`() {
+        assertTrue(forgets(NOT_BONDED, sinceMs = 1_000L, nowMs = 1_000L + window))
+    }
+
+    @Test
+    fun `the window outlasts the car's slow bond list by minutes`() {
+        assertTrue(window >= 120_000L)
+    }
+
+    @Test
+    fun `a not-paired streak starts at its first reading and holds across later ones`() {
+        assertEquals(5_000L, BluetoothWakePolicy.notBondedSince(NOT_BONDED, sinceMs = 0L, nowMs = 5_000L))
+        assertEquals(5_000L, BluetoothWakePolicy.notBondedSince(NOT_BONDED, sinceMs = 5_000L, nowMs = 90_000L))
+    }
+
+    /** An adapter that went off, or a device that read paired, breaks "not paired throughout". */
+    @Test
+    fun `any other reading ends the streak`() {
+        for (reading in listOf(BONDED, UNREADABLE, MALFORMED)) {
+            assertEquals("$reading", 0L, BluetoothWakePolicy.notBondedSince(reading, sinceMs = 5_000L, nowMs = 90_000L))
+        }
     }
 
     /** An address that is not a Bluetooth address can never become one. */
     @Test
-    fun `a malformed address is forgotten`() {
-        assertTrue(BluetoothWakePolicy.shouldForget(MALFORMED))
+    fun `a malformed address is forgotten at once`() {
+        assertTrue(forgets(MALFORMED, sinceMs = 0L, nowMs = 1_000L))
     }
 
     /**
@@ -130,7 +172,7 @@ class BluetoothWakePolicyTest {
         for (reading in BluetoothWakePolicy.BondReading.values()) {
             assertFalse(
                 "$reading was both poked and forgotten",
-                BluetoothWakePolicy.mayPoke(reading) && BluetoothWakePolicy.shouldForget(reading)
+                BluetoothWakePolicy.mayPoke(reading) && forgets(reading)
             )
         }
     }

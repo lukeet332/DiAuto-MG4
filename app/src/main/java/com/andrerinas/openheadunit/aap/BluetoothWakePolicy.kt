@@ -106,6 +106,23 @@ object BluetoothWakePolicy {
     fun mayPoke(reading: BondReading): Boolean = reading == BondReading.BONDED
 
     /**
+     * How long a stored MAC must keep reading [BondReading.NOT_BONDED], with the adapter on
+     * throughout, before it is forgotten. The car's stack reports BOND_NONE for 10-60+ s after
+     * Bluetooth comes on, so one reading proves nothing.
+     */
+    const val FORGET_AFTER_NOT_BONDED_MS = 180_000L
+
+    /**
+     * When the current run of [BondReading.NOT_BONDED] readings began: [sinceMs] carried forward,
+     * [nowMs] for the first one, and 0 once any other reading breaks the run.
+     */
+    fun notBondedSince(reading: BondReading, sinceMs: Long, nowMs: Long): Long = when {
+        reading != BondReading.NOT_BONDED -> 0L
+        sinceMs == 0L -> nowMs
+        else -> sinceMs
+    }
+
+    /**
      * Whether a stored MAC should be dropped from the Auto Start list.
      *
      * Only on evidence the device is genuinely gone. **Never on [BondReading.UNREADABLE]** —
@@ -113,11 +130,15 @@ object BluetoothWakePolicy {
      * treating that as unpaired would delete the user's configured device on any poke round that
      * landed while the adapter was off. This head unit's Bluetooth is known to cycle itself, so that
      * window is reachable, and the deletion is written straight through to device-protected storage
-     * where nothing would restore it.
+     * where nothing would restore it. And never on a single [BondReading.NOT_BONDED] either: only
+     * once it has held for [FORGET_AFTER_NOT_BONDED_MS] since [notBondedSinceMs].
      *
      * Lenient where [mayPoke] is strict: a MAC kept one round too long costs nothing, because
      * [mayPoke] will not poke it.
      */
-    fun shouldForget(reading: BondReading): Boolean =
-        reading == BondReading.NOT_BONDED || reading == BondReading.MALFORMED
+    fun shouldForget(reading: BondReading, notBondedSinceMs: Long, nowMs: Long): Boolean = when (reading) {
+        BondReading.MALFORMED -> true
+        BondReading.NOT_BONDED -> notBondedSinceMs != 0L && nowMs - notBondedSinceMs >= FORGET_AFTER_NOT_BONDED_MS
+        else -> false
+    }
 }

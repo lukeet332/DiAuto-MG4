@@ -29,7 +29,10 @@ class AutoStartReceiver : BroadcastReceiver() {
         // Use device-protected storage so the BT MACs are readable during locked boot
         val targetMacs = Settings.getAutoStartBtMacs(context)
 
-        if (targetMacs.isEmpty()) return
+        if (targetMacs.isEmpty()) {
+            AppLog.i("AutoStartReceiver: $action ignored — no Auto Start BT device saved.")
+            return
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT)
