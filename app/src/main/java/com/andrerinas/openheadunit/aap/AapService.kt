@@ -2266,12 +2266,10 @@ class AapService : Service(), UsbReceiver.Listener {
                         AppLog.i("AapService: Bluetooth auto-start — switching wifi mode to Native AA")
                         settings.wifiConnectionMode = 3
                     }
-                    if (!mac.isNullOrEmpty()) {
-                        AppLog.i("AapService: Bluetooth auto-start — poking $mac")
-                        scheduleNativeAaPoke(mac, reason = "bt auto-start")
-                    } else {
-                        scheduleNativeAaArm(reason = "bt auto-start")
-                    }
+                    // Arm only: the phone's ACL being up means it is awake, and a poke here can
+                    // take its hands-free slot.
+                    AppLog.i("AapService: Bluetooth auto-start from $mac — arming Native AA")
+                    scheduleNativeAaArm(reason = "bt auto-start")
                 }
             }
             ACTION_NEARBY_CONNECT         -> {
