@@ -65,9 +65,6 @@ class SoftApCredentialsProvider(
         /** How long to keep looking before giving up and saying so. */
         private const val RESOLVE_BUDGET_MS = 30_000L
 
-        /** How long to wait for a user-configured AP before trying to switch one on ourselves. */
-        private const val AUTO_ENABLE_AFTER_MS = 5_000L
-
         /** Not in any public SDK constant: the soft AP state broadcast and its disabled state. */
         private const val WIFI_AP_STATE_CHANGED = "android.net.wifi.WIFI_AP_STATE_CHANGED"
         private const val EXTRA_WIFI_AP_STATE = "wifi_state"
@@ -274,7 +271,8 @@ class SoftApCredentialsProvider(
                         // here, so an access point that is up but unreadable never triggers it.
                         val waited = SystemClock.elapsedRealtime() - runStartedAt
                         reportBudgetExhaustedOnce(waited)
-                        if (waited >= AUTO_ENABLE_AFTER_MS && settings.autoEnableHotspot && claimAutoEnableAttempt()) {
+                        // No grace period: a waiting phone's first-message patience is only ~13 s.
+                        if (settings.autoEnableHotspot && claimAutoEnableAttempt()) {
                             AppLog.i("SoftApCredentials: No access point after ${waited / 1000}s — trying to switch this device's hotspot on.")
                             // Best effort; most unrooted units lack the permission. Keep polling
                             // anyway, since the user may switch it on by hand.
