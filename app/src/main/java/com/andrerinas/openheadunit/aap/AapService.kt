@@ -1406,6 +1406,9 @@ class AapService : Service(), UsbReceiver.Listener {
                     nativeAaHandshakeManager?.stop()
                     serviceScope.launch {
                         delay(1500) // Give hardware time to settle before re-initializing P2P
+                        if (!commManager.isBusy && !preemptingWirelessForUsb && !isSwitchingToAccessory.get()) {
+                            restartHotspotIfStarved(settings)
+                        }
                         if (commManager.isBusy) {
                             // The phone reconnects within ~300 ms; re-initialising now would tear
                             // down the Bluetooth handshake server under the new session.
@@ -2638,6 +2641,20 @@ class AapService : Service(), UsbReceiver.Listener {
                 AppLog.i("Fallback: force=true and found single Google normal-mode device ${UsbDeviceCompat(googleDevices[0]).uniqueName}. Switching to accessory mode.")
                 performSingleUsbConnect(googleDevices[0])
             }
+        }
+    }
+
+    /** Sessions keep ending with no video: give the phone a fresh access point before re-arming. */
+    private suspend fun restartHotspotIfStarved(settings: Settings) {
+        val appOwnsHotspot = nativeTransport() == NativeTransport.HOTSPOT &&
+            settings.autoEnableHotspot && !settings.hotspotTeardownProvenUnsafe
+        val streak = commManager.starvedSessions
+        if (!VideoStarvationPolicy.shouldRestartHotspot(streak, appOwnsHotspot)) return
+        AppLog.w("AapService: $streak sessions in a row ended without video — restarting the hotspot before re-arming.")
+        // Stopped first so it does not treat the restart as the AP failing; initWifiMode() restarts it.
+        softApCredentialsProvider?.stop()
+        if (!withContext(Dispatchers.IO) { HotspotManager.restart(this@AapService) }) {
+            settings.hotspotTeardownProvenUnsafe = true
         }
     }
 

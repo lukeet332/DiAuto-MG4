@@ -62,4 +62,24 @@ class VideoStarvationPolicyTest {
         }
         assertTrue(VideoStarvationPolicy.shouldAdvise(streak))
     }
+
+    @Test
+    fun `restarts the hotspot from the second starved session in a row`() {
+        // 25 Oct: 14 no-video sessions; an incidental AP restart was what brought video back.
+        assertFalse(VideoStarvationPolicy.shouldRestartHotspot(0, appOwnsHotspot = true))
+        assertFalse(VideoStarvationPolicy.shouldRestartHotspot(1, appOwnsHotspot = true))
+        assertTrue(VideoStarvationPolicy.shouldRestartHotspot(2, appOwnsHotspot = true))
+    }
+
+    @Test
+    fun `gives each restart a session to prove itself before the next`() {
+        val restarts = (1..8).filter { VideoStarvationPolicy.shouldRestartHotspot(it, appOwnsHotspot = true) }
+
+        assertEquals(listOf(2, 4, 6, 8), restarts)
+    }
+
+    @Test
+    fun `never restarts a hotspot the app was not given charge of`() {
+        assertFalse(VideoStarvationPolicy.shouldRestartHotspot(2, appOwnsHotspot = false))
+    }
 }
