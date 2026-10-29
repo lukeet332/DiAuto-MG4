@@ -205,6 +205,9 @@ class NativeAaHandshakeManager(
     // minutes. Cancelling cannot break a blocking JNI read either, but it does end every real
     // suspension point in the handshake. Do both; whichever the stack honours wins.
     @Volatile private var activeHandshakeJob: Job? = null
+    // False once [activeHandshakeSocket]'s reader has seen the channel end, so a dead handshake
+    // can never hold the listener against the phone's reconnects.
+    @Volatile private var activeHandshakePeerAlive = true
     // Name of the primary Bluetooth radio we listen and poke on, captured in start(). A field
     // rather than a local so the diagnostic below can name the radio the phone is ignoring.
     @Volatile private var localRadioName: String = "?"
@@ -945,6 +948,7 @@ class NativeAaHandshakeManager(
             NativeHandoffPolicy.shouldKeepExistingHandshake(
                 previousJobActive = previousJob?.isActive == true,
                 credentialsReady = credentials != null,
+                previousPeerAlive = activeHandshakePeerAlive,
                 previousStartedAtMs = previousStartedAt,
                 nowMs = SystemClock.elapsedRealtime(),
             )
@@ -962,6 +966,7 @@ class NativeAaHandshakeManager(
         // ownership first and the fence is already closed when the old one unwinds.
         activeHandshakeSocket = socket
         activeHandshakeJob = coroutineContext[Job]
+        activeHandshakePeerAlive = true
         // Stamped after claiming ownership above, so a superseded handshake's cleanup — which
         // only fires when it still owns activeHandshakeSocket — can't wipe this one's stamp.
         handshakeStartedAt = SystemClock.elapsedRealtime()
@@ -1026,6 +1031,7 @@ class NativeAaHandshakeManager(
                 } catch (e: Exception) {
                     AppLog.d("NativeAA: Bluetooth reader ended: ${e.message}")
                 } finally {
+                    ifOwner(socket) { activeHandshakePeerAlive = false }
                     inbound.close()
                 }
             }
@@ -1190,6 +1196,11 @@ class NativeAaHandshakeManager(
                     }
                     return
                 }
+                if (readerClosed) {
+                    // Before Type 3 this fails the exchange so ownership is released at once.
+                    feed(WppEvent.PeerClosed)
+                    if (session.isTerminal()) return
+                }
                 if (session.stage == WppStage.SETTLING &&
                     (commManager.isConnected ||
                         commManager.connectionState.value is CommManager.ConnectionState.Connecting)) {
@@ -1251,6 +1262,13 @@ class NativeAaHandshakeManager(
                     AppLog.d("NativeAA: Still waiting... credentials=${credentials != null} (${waitedS}s)")
                 }
                 tick(500)
+            }
+
+            if (session.isTerminal()) {
+                // The phone left while we waited; the Fail action has said so. Not counted as a
+                // silent unit, as the full wait ending without credentials never was.
+                abortedLocally = true
+                return@withContext
             }
 
             // Read once. The check and the use used to be separate reads of four separate fields,

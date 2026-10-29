@@ -111,6 +111,7 @@ class NativeHandoffPolicyTest {
             NativeHandoffPolicy.shouldKeepExistingHandshake(
                 previousJobActive = true,
                 credentialsReady = false,
+                previousPeerAlive = true,
                 previousStartedAtMs = 1_000L,
                 nowMs = 1_000L + 5_000L,
             )
@@ -123,6 +124,7 @@ class NativeHandoffPolicyTest {
             NativeHandoffPolicy.shouldKeepExistingHandshake(
                 previousJobActive = true,
                 credentialsReady = true,
+                previousPeerAlive = true,
                 previousStartedAtMs = 1_000L,
                 nowMs = 1_000L + 5_000L,
             )
@@ -135,6 +137,21 @@ class NativeHandoffPolicyTest {
             NativeHandoffPolicy.shouldKeepExistingHandshake(
                 previousJobActive = false,
                 credentialsReady = false,
+                previousPeerAlive = true,
+                previousStartedAtMs = 1_000L,
+                nowMs = 1_000L + 5_000L,
+            )
+        )
+    }
+
+    @Test
+    fun `a handshake whose phone has already left never blocks the newest socket`() {
+        // 29 Oct: the phone gave up at +12-17 s and the dead wait refused 1491 reconnects.
+        assertFalse(
+            NativeHandoffPolicy.shouldKeepExistingHandshake(
+                previousJobActive = true,
+                credentialsReady = false,
+                previousPeerAlive = false,
                 previousStartedAtMs = 1_000L,
                 nowMs = 1_000L + 5_000L,
             )

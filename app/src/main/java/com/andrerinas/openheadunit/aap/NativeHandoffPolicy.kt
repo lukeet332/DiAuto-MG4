@@ -133,15 +133,18 @@ object NativeHandoffPolicy {
      * bringing up a P2P group. Replacing the wait each time cancels the only coroutine that
      * would have delivered Type 3 once credentials appear, and the log fills with
      * "closing the previous session" forever. Once credentials are ready the older rule stands:
-     * a reconnect means the earlier handoff failed, so the new socket wins.
+     * a reconnect means the earlier handoff failed, so the new socket wins. So does it when the
+     * earlier phone has already closed its channel: nothing is left to deliver Type 3 to.
      */
     fun shouldKeepExistingHandshake(
         previousJobActive: Boolean,
         credentialsReady: Boolean,
+        previousPeerAlive: Boolean,
         previousStartedAtMs: Long,
         nowMs: Long,
     ): Boolean =
         previousJobActive &&
+            previousPeerAlive &&
             !credentialsReady &&
             isHandshaking(previousStartedAtMs, nowMs)
 
