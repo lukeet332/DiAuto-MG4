@@ -2317,7 +2317,7 @@ class AapService : Service(), UsbReceiver.Listener {
     // -------------------------------------------------------------------------
 
     override fun onUsbAttach(device: UsbDevice) {
-        if (!UsbDeviceCompat.isAndroidDevice(device)) {
+        if (!isPhoneCandidate(device)) {
             AppLog.i("Ignoring non-Android USB device attached in service (VID: ${device.vendorId}): ${device.deviceName}")
             return
         }
@@ -2374,7 +2374,7 @@ class AapService : Service(), UsbReceiver.Listener {
     }
 
     override fun onUsbPermission(granted: Boolean, connect: Boolean, device: UsbDevice) {
-        if (!UsbDeviceCompat.isAndroidDevice(device)) {
+        if (!isPhoneCandidate(device)) {
             AppLog.i("Ignoring USB permission callback for non-Android device (VID: ${device.vendorId}): ${device.deviceName}")
             return
         }
@@ -2504,8 +2504,22 @@ class AapService : Service(), UsbReceiver.Listener {
         // USB projection already running — leave it alone.
         if (commManager.isConnected && !commManager.isWirelessSession) return
 
+        val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+        val deviceList = usbManager.deviceList.values.filter { isPhoneCandidate(it) }
+
         if (commManager.isBusy) {
             if (!force) return
+            val allowed = settings.allowedDevices
+            val candidates = deviceList.map {
+                UsbTargetPolicy.UsbCandidate(
+                    it.vendorId, it.productId, UsbDeviceCompat.isInAccessoryMode(it),
+                    allowed.contains(UsbDeviceCompat(it).uniqueName)
+                )
+            }
+            if (!UsbTargetPolicy.hasTarget(candidates, lastSession, usbAutoStart, singleUsb, allowed.isNotEmpty(), force)) {
+                AppLog.i("AapService: No USB phone to connect — leaving the wireless session alone.")
+                return
+            }
             if (afterWirelessPreempt) {
                 AppLog.w("AapService: Still busy after wireless preempt — skipping USB this pass.")
                 preemptingWirelessForUsb = false
@@ -2529,9 +2543,6 @@ class AapService : Service(), UsbReceiver.Listener {
             }
             return
         }
-
-        val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
-        val deviceList = usbManager.deviceList.values.filter { UsbDeviceCompat.isAndroidDevice(it) }
 
         // Check for devices already in accessory mode first.
         // After AOA switch the device re-enumerates and appears as a new USB device — we must
@@ -2629,6 +2640,9 @@ class AapService : Service(), UsbReceiver.Listener {
             }
         }
     }
+
+    private fun isPhoneCandidate(device: UsbDevice): Boolean =
+        UsbDeviceCompat.isAndroidDevice(device) && !UsbTargetPolicy.isCarModem(device.vendorId, device.productId)
 
     private fun performSingleUsbConnect(device: UsbDevice) {
         val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
