@@ -35,13 +35,17 @@ object HotspotManager {
     private var cachedCallbackClass: Class<*>? = null
 
     /**
-     * Whether a start is already running. Bringing an access point up takes up to
+     * The start that is already running, if any. Bringing an access point up takes up to
      * [AP_STATE_TIMEOUT_MS] per band, and more than one caller asks for it: the credentials
      * provider auto-enables, and every "still waiting for credentials" refresh can ask again. Two
      * overlapping sweeps race each other's bands and end with a log claiming the access point came
-     * up twice, on both of them.
+     * up twice, on both of them. A second caller waits for the running sweep's result: answering
+     * it `false` mid-sweep made the provider write off its attempt as failed.
      */
-    @Volatile private var startInFlight = false
+    private val startSweep = SingleFlight<Boolean>()
+
+    /** Whether a start sweep is running right now. */
+    val isStartInFlight: Boolean get() = startSweep.isRunning
 
     /**
      * Takes the access point down and brings it straight back up.
@@ -179,62 +183,59 @@ object HotspotManager {
             return true
         }
 
-        // Claimed before anything slow runs, or a second caller walks past while the first is
-        // still waiting for the access point.
-        synchronized(this) {
-            if (startInFlight) {
-                AppLog.i("HotspotManager: A hotspot start is already running; letting it finish rather than starting a second one.")
-                return isApUp(context)
-            }
-            startInFlight = true
+        return try {
+            startSweep.run(
+                onJoin = { AppLog.i("HotspotManager: A hotspot start is already running; waiting for its result rather than starting a second one.") }
+            ) { sweepBands(context) }
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            isApUp(context)
         }
+    }
 
+    private fun sweepBands(context: Context): Boolean {
         // DiPlay CarHotspotController does not force the station radio off before SoftAP enable.
         // On SAIC MG4 that call can disrupt the built-in car SoftAP path; the framework drops
         // the station itself when tethering needs the radio.
-        try {
-            // 5 GHz first, 2.4 GHz only if the radio will not host an access point on it. See
-            // SoftApBandPolicy for why the order is not a preference.
-            var attemptedAny = false
-            for ((index, band) in SoftApBandPolicy.attemptOrder().withIndex()) {
-                if (index > 0) {
-                    AppLog.w("HotspotManager: no access point on ${SoftApBandPolicy.describe(SoftApBandPolicy.attemptOrder()[index - 1])}; retrying on ${SoftApBandPolicy.describe(band)}. Android Auto is known to drop within seconds on 2.4 GHz — if the projection dies shortly after connecting, this line is why.")
-                }
-                val outcome = startOnBand(context, enabled = true, band = band)
-                attemptedAny = attemptedAny || outcome.attempted
-                if (outcome.up) {
-                    AppLog.i(describeApUp(outcome.configured, band))
-                    return true
-                }
-                if (!outcome.configured) {
-                    // The band never reached the framework, so the next one would post the same
-                    // request against the same stored configuration and start the same access
-                    // point again. Measured on a unit that refuses setSoftApConfiguration(): three
-                    // start requests, all `channels {3=0}`, two of them tearing down an access
-                    // point the previous one had just brought up.
-                    AppLog.w("HotspotManager: This device would not take a band request, so trying ${SoftApBandPolicy.describe(SoftApBandPolicy.attemptOrder().last())} would start the same access point again. Leaving the band to the device.")
-                    break
-                }
+        // 5 GHz first, 2.4 GHz only if the radio will not host an access point on it. See
+        // SoftApBandPolicy for why the order is not a preference.
+        var attemptedAny = false
+        for ((index, band) in SoftApBandPolicy.attemptOrder().withIndex()) {
+            if (index > 0) {
+                AppLog.w("HotspotManager: no access point on ${SoftApBandPolicy.describe(SoftApBandPolicy.attemptOrder()[index - 1])}; retrying on ${SoftApBandPolicy.describe(band)}. Android Auto is known to drop within seconds on 2.4 GHz — if the projection dies shortly after connecting, this line is why.")
             }
-
-            // A request the framework accepted late still brings an access point up, after the band
-            // it belonged to has been written off. Look once more before reporting failure: saying
-            // no here is what makes a caller start a second, overlapping sweep.
-            if (attemptedAny && awaitApUp(context)) {
-                AppLog.i("HotspotManager: An access point came up after its band's window had expired; taking it. Which band it chose is not something this app can read.")
+            val outcome = startOnBand(context, enabled = true, band = band)
+            attemptedAny = attemptedAny || outcome.attempted
+            if (outcome.up) {
+                AppLog.i(describeApUp(outcome.configured, band))
                 return true
             }
-
-            if (attemptedAny) {
-                AppLog.w("HotspotManager: Every start path was tried on every band and no access point came up within ${AP_STATE_TIMEOUT_MS / 1000}s each. On a non-privileged install this usually cannot be done from an app — switch the hotspot on in system settings instead.")
-            } else {
-                AppLog.w("HotspotManager: All hotspot attempts failed.")
+            if (!outcome.configured) {
+                // The band never reached the framework, so the next one would post the same
+                // request against the same stored configuration and start the same access
+                // point again. Measured on a unit that refuses setSoftApConfiguration(): three
+                // start requests, all `channels {3=0}`, two of them tearing down an access
+                // point the previous one had just brought up.
+                AppLog.w("HotspotManager: This device would not take a band request, so trying ${SoftApBandPolicy.describe(SoftApBandPolicy.attemptOrder().last())} would start the same access point again. Leaving the band to the device.")
+                break
             }
-            warnIfRadioLeftDown(context)
-            return false
-        } finally {
-            startInFlight = false
         }
+
+        // A request the framework accepted late still brings an access point up, after the band
+        // it belonged to has been written off. Look once more before reporting failure: saying
+        // no here is what makes a caller start a second, overlapping sweep.
+        if (attemptedAny && awaitApUp(context)) {
+            AppLog.i("HotspotManager: An access point came up after its band's window had expired; taking it. Which band it chose is not something this app can read.")
+            return true
+        }
+
+        if (attemptedAny) {
+            AppLog.w("HotspotManager: Every start path was tried on every band and no access point came up within ${AP_STATE_TIMEOUT_MS / 1000}s each. On a non-privileged install this usually cannot be done from an app — switch the hotspot on in system settings instead.")
+        } else {
+            AppLog.w("HotspotManager: All hotspot attempts failed.")
+        }
+        warnIfRadioLeftDown(context)
+        return false
     }
 
     /**

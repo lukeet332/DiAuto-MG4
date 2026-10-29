@@ -11,6 +11,7 @@ import android.widget.Toast
 import androidx.core.content.ContextCompat
 import com.andrerinas.openheadunit.R
 import com.andrerinas.openheadunit.aap.ApInterfaceCandidate
+import com.andrerinas.openheadunit.aap.AutoEnablePolicy
 import com.andrerinas.openheadunit.aap.SoftApBssidPolicy
 import com.andrerinas.openheadunit.aap.NativeCredentialsPolicy
 import com.andrerinas.openheadunit.aap.SoftApCredentials
@@ -89,14 +90,14 @@ class SoftApCredentialsProvider(
     @Volatile private var autoEnabled = false
 
     /**
-     * Whether switching the hotspot on has already been tried since [start].
+     * When switching the hotspot on was last tried since [start], or null if not yet.
      *
-     * A field rather than a local in [beginResolve], because [refresh] restarts that loop and the
-     * handshake calls it every time it has been waiting too long — which used to re-arm auto-enable
-     * on each one, so a slow access point got a second start sweep on top of the first, racing it
-     * band for band. One attempt per run is the whole of the best effort on offer.
+     * A field rather than a local in [beginResolve], because [refresh] restarts that loop every
+     * ~10 s. [AutoEnablePolicy] spaces retries and skips while a sweep is in flight, so a slow
+     * access point never gets a second sweep racing the first; a one-shot latch here left the
+     * hotspot dark for a whole drive after its only attempt was lost.
      */
-    @Volatile private var triedAutoEnable = false
+    private var lastAutoEnableAt: Long? = null
 
     /** So the once-per-second poll reports "nothing here" once, not thirty times. */
     @Volatile private var reportedNoInterface = false
@@ -135,13 +136,13 @@ class SoftApCredentialsProvider(
             if (state != WIFI_AP_STATE_DISABLED) return
             AppLog.w("SoftApCredentials: The hotspot went down — the credentials the phone was given are no longer valid.")
             refresh()
-            if (autoEnabled && isRunning) {
-                AppLog.i("SoftApCredentials: Re-enabling the hotspot we started, once.")
-                autoEnabled = false
+            if (autoEnabled && isRunning && claimAutoEnableAttempt()) {
+                AppLog.i("SoftApCredentials: Re-enabling the hotspot we started.")
                 // Off the main thread: setHotspotEnabled waits for the access point to actually
                 // come up, and onReceive() has an ANR budget measured in seconds.
                 scope.launch(Dispatchers.IO + CoroutineName("SoftApCredentials-Reenable")) {
                     HotspotManager.setHotspotEnabled(context, true)
+                    markAutoEnableAttemptEnded()
                     refresh()
                 }
             }
@@ -165,7 +166,7 @@ class SoftApCredentialsProvider(
         isRunning = true
         // elapsedRealtime survives head-unit wall-clock jumps (seen as "after 245014311s").
         runStartedAt = SystemClock.elapsedRealtime()
-        triedAutoEnable = false
+        lastAutoEnableAt = null
         reportedConfigUnreadable = false
         reportedBudgetExhausted = false
         if (!isReceiverRegistered) {
@@ -197,7 +198,7 @@ class SoftApCredentialsProvider(
         resolveJob?.cancel()
         resolveJob = null
         autoEnabled = false
-        triedAutoEnable = false
+        lastAutoEnableAt = null
         reportedConfigUnreadable = false
         reportedBudgetExhausted = false
         captivePortalSpoof.stop()
@@ -273,12 +274,12 @@ class SoftApCredentialsProvider(
                         // here, so an access point that is up but unreadable never triggers it.
                         val waited = SystemClock.elapsedRealtime() - runStartedAt
                         reportBudgetExhaustedOnce(waited)
-                        if (!triedAutoEnable && waited >= AUTO_ENABLE_AFTER_MS && settings.autoEnableHotspot) {
-                            triedAutoEnable = true
+                        if (waited >= AUTO_ENABLE_AFTER_MS && settings.autoEnableHotspot && claimAutoEnableAttempt()) {
                             AppLog.i("SoftApCredentials: No access point after ${waited / 1000}s — trying to switch this device's hotspot on.")
                             // Best effort; most unrooted units lack the permission. Keep polling
                             // anyway, since the user may switch it on by hand.
-                            autoEnabled = HotspotManager.setHotspotEnabled(context, true)
+                            if (HotspotManager.setHotspotEnabled(context, true)) autoEnabled = true
+                            markAutoEnableAttemptEnded()
                         }
                     }
                 }
@@ -290,6 +291,21 @@ class SoftApCredentialsProvider(
                 invalidateIfCurrent(generation)
             }
         }
+    }
+
+    /** Stamps an auto-enable attempt if [AutoEnablePolicy] allows one now; atomic across callers. */
+    @Synchronized
+    private fun claimAutoEnableAttempt(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (!AutoEnablePolicy.shouldTry(lastAutoEnableAt, now, HotspotManager.isStartInFlight)) return false
+        lastAutoEnableAt = now
+        return true
+    }
+
+    /** Restarts the interval from the end of a sweep, so a slow failing one is not retried at once. */
+    @Synchronized
+    private fun markAutoEnableAttemptEnded() {
+        if (isRunning) lastAutoEnableAt = SystemClock.elapsedRealtime()
     }
 
     @Synchronized
