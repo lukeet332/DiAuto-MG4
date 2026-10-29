@@ -144,4 +144,10 @@ object NativeHandoffPolicy {
         previousJobActive &&
             !credentialsReady &&
             isHandshaking(previousStartedAtMs, nowMs)
+
+    /** Rounds (3 s apart) to keep looking for a paired phone before giving up: about a minute. */
+    const val NO_DEVICE_POKE_ROUNDS = 20
+
+    /** At boot the bond list can be empty for a few seconds; one empty look is not "no phone". */
+    fun keepPokingWithoutDevices(emptyRounds: Int): Boolean = emptyRounds < NO_DEVICE_POKE_ROUNDS
 }

@@ -613,10 +613,13 @@ class AapTransport(
             var peerSentBytes = false
             var transportError = false
             // Outer deadline prevents the loop from running for minutes on an unresponsive device.
-            // Each send+recv pair uses 2 s per operation; 3 attempts × 4 s ≈ 12 s worst-case,
-            // capped here at HANDSHAKE_TIMEOUT_MS so a stuck device fails fast.
+            // USB resends every 2 s up to 3 times; a socket sends once and waits. Both are capped
+            // here at HANDSHAKE_TIMEOUT_MS so a stuck device fails fast.
             val versionDeadline = SystemClock.elapsedRealtime() + HANDSHAKE_TIMEOUT_MS
-            while (attempt < 3 && connection.isConnected) {
+            val reliableStream = connection is SocketAccessoryConnection
+            val maxAttempts = VersionExchangePolicy.attempts(reliableStream)
+            val responseWaitMs = VersionExchangePolicy.responseWaitMs(reliableStream, HANDSHAKE_TIMEOUT_MS)
+            while (attempt < maxAttempts && connection.isConnected) {
                 if (SystemClock.elapsedRealtime() >= versionDeadline) {
                     AppLog.e("Handshake: Version exchange timed out after $attempt attempt(s).")
                     return false
@@ -642,7 +645,7 @@ class AapTransport(
                 // "version response received" would hand a random payload to the SSL layer and
                 // cause a 15 s timeout. Instead, discard unexpected messages and keep reading
                 // until the deadline expires.
-                val recvDeadline = SystemClock.elapsedRealtime() + 2000
+                val recvDeadline = minOf(SystemClock.elapsedRealtime() + responseWaitMs, versionDeadline)
                 while (SystemClock.elapsedRealtime() < recvDeadline) {
                     val remaining = (recvDeadline - SystemClock.elapsedRealtime())
                         .toInt().coerceAtLeast(100)
@@ -666,7 +669,7 @@ class AapTransport(
                              "Waiting for VERSION_RESPONSE.")
                 }
                 if (received) break
-                AppLog.w("Handshake: No VERSION_RESPONSE within 2s (attempt $attempt), ret=$ret")
+                AppLog.w("Handshake: No VERSION_RESPONSE within ${responseWaitMs}ms (attempt $attempt), ret=$ret")
                 SystemClock.sleep(200)
             }
 
@@ -734,8 +737,9 @@ class AapTransport(
             return
         }
 
-        if (aapKeyCode == KeyEvent.KEYCODE_UNKNOWN) {
-            AppLog.i("Unknown: $keyCode")
+        if (!KeyCode.shouldSendToAndroidAuto(aapKeyCode)) {
+            AppLog.i("Unknown: $keyCode - not sent to Android Auto")
+            return
         }
 
         val ts = SystemClock.elapsedRealtime()

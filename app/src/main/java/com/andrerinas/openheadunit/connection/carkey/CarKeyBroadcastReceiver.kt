@@ -7,8 +7,11 @@ import android.content.IntentFilter
 import android.view.KeyEvent
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
+import com.andrerinas.openheadunit.App
 import com.andrerinas.openheadunit.utils.AppLog
 import com.evsuite.hardware.PhysicalButtonEventDecoder
+import com.evsuite.hardware.EVHardware
+import com.andrerinas.openheadunit.aap.CarRadioPassthroughPolicy
 
 /**
  * A comprehensive receiver for steering wheel and hardware buttons,
@@ -22,8 +25,8 @@ class CarKeyBroadcastReceiver : BroadcastReceiver(), CarKeyReceiver {
         private const val EXTRA_SAIC_KEYCODE = "android.intent.extra.hardkey.keycode"
         private const val EXTRA_SAIC_DOWN = "android.intent.extra.hardkey.down"
         private const val EXTRA_SAIC_LONGPRESS = "android.intent.extra.hardkey.longpress"
-        /** Observed on MG4: pause/play paddle — not in [PhysicalButtonEventDecoder]. */
-        private const val SAIC_KEYCODE_PLAY_PAUSE = 301
+        /** Steering-wheel voice key (stock AllGo KEYCODE_VOICE). */
+        private const val SAIC_KEYCODE_VOICE = 287
 
         val ACTIONS = arrayOf(
             "android.intent.action.MEDIA_BUTTON",
@@ -174,10 +177,28 @@ class CarKeyBroadcastReceiver : BroadcastReceiver(), CarKeyReceiver {
 
         val isDown = intent.getBooleanExtra(EXTRA_SAIC_DOWN, false)
         val isLong = intent.getBooleanExtra(EXTRA_SAIC_LONGPRESS, false)
+        AppLog.i("CarKeyReceiver: SAIC hardkey code=$keyCode down=$isDown long=$isLong")
 
-        // Play/pause paddle is outside the R69 decoder table.
-        if (keyCode == SAIC_KEYCODE_PLAY_PAUSE) {
-            if (!isDown) handleClick(context, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+        // Voice key: forward the real press to Android Auto as stock AllGo does on this car (search
+        // down on press, up on release); the phone decides between a tap and a hold.
+        if (keyCode == SAIC_KEYCODE_VOICE) {
+            if (!isLong) {
+                App.provide(context).commManager.sendKey(KeyEvent.KEYCODE_SEARCH, isDown, null, "steering-voice")
+                AppLog.i("CarKeyReceiver: voice key ${if (isDown) "down" else "up"} -> Android Auto assistant key")
+            }
+            return
+        }
+
+        // Right-cluster OK/left/right: the car acts on them itself; Android Auto only gets them while its music is the car's source.
+        if (keyCode == CarRadioPassthroughPolicy.SAIC_OK || keyCode == CarRadioPassthroughPolicy.SAIC_LEFT || keyCode == CarRadioPassthroughPolicy.SAIC_RIGHT) {
+            if (isDown || isLong) return
+            val aaKey = CarRadioPassthroughPolicy.wheelKeyForAndroidAuto(
+                keyCode,
+                carMusicFocusHeld = App.provide(context).commManager.holdsCarMusicFocus(),
+                swcMode = EVHardware.getSwcFunctionMode(),
+                callActive = com.andrerinas.openheadunit.bridge.AllGoBridgeLink.callActive,
+            )
+            if (aaKey != null) handleClick(context, aaKey) else AppLog.i("CarKeyReceiver: wheel key $keyCode left to the car")
             return
         }
 

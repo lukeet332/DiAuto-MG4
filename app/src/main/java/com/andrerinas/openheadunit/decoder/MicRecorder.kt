@@ -50,6 +50,7 @@ class MicRecorder(private val micSampleRate: Int, private val context: Context) 
             micAudioBuf = ByteArray(minSize)
             isAvailable = true
         }
+        CarVoicePath.prepare(context)
     }
 
     private var threadMicAudioActive = false
@@ -64,6 +65,9 @@ class MicRecorder(private val micSampleRate: Int, private val context: Context) 
         // Sentinel value stored in settings to indicate Bluetooth SCO mode
         const val SOURCE_BLUETOOTH_SCO = 100
         private const val SCO_CONNECT_TIMEOUT_MS = 2_000L
+        private const val START_ATTEMPTS = 10
+        private const val START_RETRY_MS = 200L
+        private const val LEVEL_REPORTS = 6
     }
 
     interface Listener {
@@ -72,6 +76,7 @@ class MicRecorder(private val micSampleRate: Int, private val context: Context) 
 
     fun stop() {
         AppLog.i("MicRecorder: Stopping. Active: $threadMicAudioActive")
+        CarVoicePath.disable(context)
         
         threadMicAudioActive = false
         threadMicAudio?.interrupt()
@@ -132,6 +137,52 @@ class MicRecorder(private val micSampleRate: Int, private val context: Context) 
         AppLog.i("MicRecorder: Bluetooth SCO stopped and audio settings restored")
     }
 
+    /**
+     * Before Android 10 only one app can capture at once: while another holds the mic,
+     * startRecording() returns without recording. Retry while SAIC's wake-word engine releases it.
+     */
+    private fun startUntilRecording(): Boolean {
+        val record = audioRecord ?: return false
+        repeat(START_ATTEMPTS) { attempt ->
+            record.startRecording()
+            if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                AppLog.i("MicRecorder: recording (attempt ${attempt + 1})")
+                return true
+            }
+            AppLog.w("MicRecorder: not recording yet (attempt ${attempt + 1}) - mic busy")
+            try { record.stop() } catch (_: Exception) {}
+            Thread.sleep(START_RETRY_MS)
+        }
+        return false
+    }
+
+    private var levelWindowStart = 0L
+    private var levelPeak = 0
+    private var levelBytes = 0L
+    private var levelReports = 0
+
+    /** Logs the loudest sample each second for the first few seconds: silence vs real audio. */
+    private fun trackLevel(buf: ByteArray, len: Int) {
+        if (levelReports >= LEVEL_REPORTS) return
+        var i = 0
+        while (i + 1 < len) {
+            val sample = (buf[i].toInt() and 0xff) or (buf[i + 1].toInt() shl 8)
+            val abs = kotlin.math.abs(sample.toShort().toInt())
+            if (abs > levelPeak) levelPeak = abs
+            i += 2
+        }
+        levelBytes += len
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (levelWindowStart == 0L) levelWindowStart = now
+        if (now - levelWindowStart >= 1_000) {
+            AppLog.i("MicRecorder: level peak=$levelPeak/32767 over $levelBytes bytes${if (levelPeak == 0) " (SILENCE)" else ""}")
+            levelReports++
+            levelWindowStart = now
+            levelPeak = 0
+            levelBytes = 0
+        }
+    }
+
     private fun micAudioRead(aud_buf: ByteArray, max_len: Int): Int {
         val currentAudioRecord = audioRecord ?: return 0
         val currentListener = listener ?: return 0
@@ -144,13 +195,14 @@ class MicRecorder(private val micSampleRate: Int, private val context: Context) 
             return len
         }
 
+        trackLevel(aud_buf, len)
         currentListener.onMicDataAvailable(aud_buf, len)
         return len
     }
 
     private fun getAudioSource(index: Int): Int {
         return when (index) {
-            0 -> MediaRecorder.AudioSource.DEFAULT
+            0 -> MediaRecorder.AudioSource.MIC // As MG's own Android Auto (AllGo) records.
             1 -> MediaRecorder.AudioSource.MIC
             2 -> MediaRecorder.AudioSource.VOICE_RECOGNITION
             3 -> MediaRecorder.AudioSource.VOICE_COMMUNICATION
@@ -181,6 +233,7 @@ class MicRecorder(private val micSampleRate: Int, private val context: Context) 
             return 0
         }
 
+        CarVoicePath.enable(context, com.andrerinas.openheadunit.App.provide(context).commManager.isWirelessSession)
         val configuredSource = getAudioSource(settings.micInputSource)
         val ok = if (configuredSource == SOURCE_BLUETOOTH_SCO) {
             startScoAndRecord()
@@ -193,6 +246,7 @@ class MicRecorder(private val micSampleRate: Int, private val context: Context) 
             0
         } else {
             AppLog.e("MicRecorder: start failed — AudioRecord not initialized")
+            CarVoicePath.disable(context)
             -7
         }
     }
@@ -359,7 +413,14 @@ class MicRecorder(private val micSampleRate: Int, private val context: Context) 
                 }
             }
 
-            audioRecord?.startRecording()
+            if (!startUntilRecording()) {
+                AppLog.e("MicRecorder: the mic never started recording - another app still holds it")
+                audioRecord?.release()
+                audioRecord = null
+                return false
+            }
+            levelWindowStart = 0L
+            levelReports = 0
 
             threadMicAudioActive = true
             threadMicAudio = Thread({

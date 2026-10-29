@@ -27,6 +27,10 @@ class LauncherAndroidAutoClickService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            maybeReturnFromCarCallScreen(event)
+            return
+        }
         if (event.eventType != AccessibilityEvent.TYPE_VIEW_CLICKED) return
         val pkg = event.packageName?.toString() ?: return
         if (pkg !in LAUNCHER_PACKAGES) return
@@ -87,6 +91,28 @@ class LauncherAndroidAutoClickService : AccessibilityService() {
         a.getBoundsInScreen(ra)
         b.getBoundsInScreen(rb)
         return ra.intersect(rb)
+    }
+
+    /** Puts Android Auto's call screen back in front of the car's own; see [CallScreenPolicy]. */
+    private fun maybeReturnFromCarCallScreen(event: AccessibilityEvent) {
+        val activityClass = event.className?.toString() ?: return
+        if (activityClass != CallScreenPolicy.BT_CALL_ACTIVITY) return
+        val sessionActive = try { com.andrerinas.openheadunit.App.provide(this).commManager.isConnected } catch (e: Exception) { false }
+        val inCall = try {
+            (getSystemService(TELECOM_SERVICE) as android.telecom.TelecomManager).isInCall
+        } catch (e: Exception) { false }
+        val sincePaused = SystemClock.elapsedRealtime() - com.andrerinas.openheadunit.aap.AapProjectionActivity.lastPausedElapsedMs
+        if (!CallScreenPolicy.shouldReturnToProjection(activityClass, sessionActive, inCall, sincePaused)) {
+            AppLog.d("LauncherAaClick: car call screen opened (session=$sessionActive inCall=$inCall sincePaused=${sincePaused}ms) - leaving it")
+            return
+        }
+        AppLog.i("LauncherAaClick: car call screen covered Android Auto during a call - returning to Android Auto")
+        try {
+            startActivity(Intent(this, com.andrerinas.openheadunit.aap.AapProjectionActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+        } catch (e: Exception) {
+            AppLog.w("LauncherAaClick: could not return to Android Auto: ${e.message}")
+        }
     }
 
     private fun maybeLaunch(node: AccessibilityNodeInfo) {

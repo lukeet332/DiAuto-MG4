@@ -1392,8 +1392,11 @@ class VideoDecoder(
                 codecBufferInfo = MediaCodec.BufferInfo()
                 val format = buildFormat(mimeType, width, height, bestCodec)
                 for ((key, value) in tier.integerKeys) format.setInteger(key, value)
+                val latencyKeys = DecoderLatencyPolicy.extraIntegerKeys(bestCodec)
+                for ((key, value) in latencyKeys) format.setInteger(key, value)
 
-                val keyDetail = if (tier.integerKeys.isEmpty()) "" else " ${tier.integerKeys.keys}"
+                val keyDetail = (if (tier.integerKeys.isEmpty()) "" else " ${tier.integerKeys.keys}") +
+                    (if (latencyKeys.isEmpty()) "" else " latency=${latencyKeys.keys}")
                 AppLog.i(
                     "Configuring decoder: $bestCodec for ${width}x${height}, " +
                         "max-input-size=${requestedMaxInputSize / 1024}KB, memory=$memoryReading, " +
@@ -1728,7 +1731,7 @@ class VideoDecoder(
         AppLog.i(
             "Throughput over ${elapsed}ms: rendered=$rendered (${renderedFps}fps), " +
                 "fed=$fed (${fedFps}fps), dropped=$dropped, skipped=$skipped, " +
-                "inputWait=${inputWait}ms, codec=$currentCodecName"
+                "inputWait=${inputWait}ms, latency ${latency.summaryAndReset()} (pacer ${paceWait.summaryAndReset()}), codec=$currentCodecName"
         )
         reportBackpressure(elapsed, inputWait, dropped)
     }
@@ -1766,12 +1769,18 @@ class VideoDecoder(
     /**
      * Dedicated thread to pull decoded frames and render them to the surface.
      */
+    private val latency = LatencyStats()
+    /** The part of [latency] spent waiting for the pacer's display slot rather than decoding. */
+    private val paceWait = LatencyStats()
+
     private fun outputThreadLoop() {
         AppLog.i("Output thread started")
         val pacer = if (Build.VERSION.SDK_INT >= 21 && settings.viewMode == Settings.ViewMode.SURFACE)
             FrameReleasePacer(settings.displayRefreshRate) else null
+        var lastReleaseTargetNanos = 0L
         fun releaseFrame(codec: MediaCodec, index: Int): Boolean {
             if (pacer == null) {
+                lastReleaseTargetNanos = System.nanoTime()
                 codec.releaseOutputBuffer(index, true)
                 return true
             }
@@ -1781,6 +1790,7 @@ class VideoDecoder(
                 framesSkippedAtRender++
                 return false
             }
+            lastReleaseTargetNanos = target
             codec.releaseOutputBuffer(index, target)
             return true
         }
@@ -1849,6 +1859,10 @@ class VideoDecoder(
                     val renderIndex = readyIndices[readyCount - 1]
 
                     if (!releaseFrame(currentCodec, renderIndex)) continue
+                    // pts is the frame's arrival time off the socket, so this is the car's own share
+                    // of touch-to-screen latency: network read to the display slot it was given.
+                    latency.record(((lastReleaseTargetNanos - startTime) / 1_000_000 - bufferInfo.presentationTimeUs / 1_000).toInt())
+                    paceWait.record(((lastReleaseTargetNanos - System.nanoTime()) / 1_000_000).toInt().coerceAtLeast(0))
                     lastFrameRenderedMs = SystemClock.elapsedRealtime()
                     renderedThisSession = true
                     lastOutputMs = lastFrameRenderedMs

@@ -720,6 +720,7 @@ class NativeAaHandshakeManager(
             AppLog.d("NativeAA: triggerPoke() delay starting (2s)...")
             delay(2000) // Small safety delay before connecting
 
+            var emptyRounds = 0
             while (isRunning && isActive) {
                 val settling = isHandoffSettling()
                 val handshaking = isHandshakeInFlight()
@@ -760,9 +761,17 @@ class NativeAaHandshakeManager(
                 }
 
                 if (devicesToPoke.isEmpty()) {
-                    AppLog.w("NativeAA: No paired Bluetooth devices found to poke.")
-                    return@launch
+                    emptyRounds++
+                    if (!NativeHandoffPolicy.keepPokingWithoutDevices(emptyRounds)) {
+                        AppLog.w("NativeAA: No paired Bluetooth devices found to poke after $emptyRounds tries - giving up.")
+                        return@launch
+                    }
+                    if (emptyRounds == 1) AppLog.w("NativeAA: No paired Bluetooth devices found to poke yet - retrying while Bluetooth settles.")
+                    delay(3000)
+                    continue
                 }
+                if (emptyRounds > 0) AppLog.i("NativeAA: Paired device found after $emptyRounds empty look(s).")
+                emptyRounds = 0
 
                 for (device in devicesToPoke) {
                     if (!isRunning || !isActive || isHandshakeInFlight() || isHandoffSettling()) break
@@ -984,6 +993,9 @@ class NativeAaHandshakeManager(
                 return@withContext
             }
 
+            com.andrerinas.openheadunit.bridge.AllGoBridgeLink.phoneName = device.name
+            com.andrerinas.openheadunit.bridge.AllGoBridgeLink.phoneBtMac = device.address
+
             val macs = settings.autoStartBluetoothDeviceMacs
             if (!macs.contains(device.address)) {
                 AppLog.i("NativeAA: Saving ${device.address} (${device.name}) to the list of auto-start devices.")
@@ -1040,8 +1052,9 @@ class NativeAaHandshakeManager(
                     }
                     WppAction.SendInfoResponse -> {
                         AppLog.i("NativeAA: Phone ready for WiFi association. Delivering credentials...")
-                        AppLog.i("NativeAA: [TX] Sending WifiInfoResponse (Type 3) with full credentials in 1000ms...")
-                        delay(1000) // [FIX] Increased delay to give phone more processing time
+                        AppLog.i("NativeAA: [TX] Sending WifiInfoResponse (Type 3) with full credentials")
+                        // No delay: a phone already on the hotspot is projecting within ~0.7 s, and a
+                        // late Type 3 makes it reconnect and tear that session down (error 1001).
                         sendWifiSecurityResponse(output, credSsid, credPsk, credBssid, transport)
                         AppLog.i("NativeAA: Handshake completed successfully on Bluetooth side.")
                         ifOwner(socket) {
@@ -1069,7 +1082,7 @@ class NativeAaHandshakeManager(
                         ifOwner(socket) { handoffSettlingSince = SystemClock.elapsedRealtime() }
                     }
                     WppAction.CompleteSuccess -> {
-                        AppLog.i("NativeAA: WiFi session landed. Handshake session ending, releasing Bluetooth connection.")
+                        AppLog.i("NativeAA: WiFi session landed. Holding the Bluetooth channel for the session and answering the phone's pings, as a head unit does.")
                         ifOwner(socket) {
                             handoffSettlingSince = 0L
                             // Stop accepting new AA_UUID connections too, not just this socket —
@@ -1078,6 +1091,12 @@ class NativeAaHandshakeManager(
                             // closeAaListeners() kdoc.
                             closeAaListeners()
                         }
+                    }
+                    is WppAction.Release -> {
+                        AppLog.i(
+                            if (action.peerClosed) "NativeAA: the phone closed the held Bluetooth channel."
+                            else "NativeAA: the projection session ended; releasing the held Bluetooth channel."
+                        )
                     }
                     is WppAction.Fail -> {
                         AppLog.w("NativeAA: Handshake failed — ${action.reason}.")
@@ -1158,6 +1177,13 @@ class NativeAaHandshakeManager(
                         feed(WppEvent.MessageReceived(msg.type, parseStatus(msg)), msg)
                         if (session.isTerminal()) return
                     }
+                }
+                if (session.stage == WppStage.HOLDING) {
+                    when {
+                        readerClosed -> feed(WppEvent.PeerClosed)
+                        !commManager.isBusy -> feed(WppEvent.SessionEnded)
+                    }
+                    return
                 }
                 if (session.stage == WppStage.SETTLING &&
                     (commManager.isConnected ||

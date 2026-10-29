@@ -226,6 +226,9 @@
             </intent-filter>
         </service>
         <service android:name=".location.GpsLocationService" />
+        <receiver
+            android:name=".bridge.AllGoBridgeInstaller$ResultReceiver"
+            android:exported="false" />
 
         <!-- Opens DiAuto when the OEM launcher Android Auto tile is tapped while inactive. -->
         <service
@@ -302,6 +305,7 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.USER_UNLOCKED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
                 <!-- Generic / OEM quick boot -->
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />

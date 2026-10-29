@@ -64,7 +64,14 @@ internal class AapControlMedia(
                 aapTransport.onUpdateUiConfigReplyReceived?.invoke()
                 return 0
             }
-            Media.MsgType.MEDIA_MESSAGE_ACK_VALUE -> return 0
+            Media.MsgType.MEDIA_MESSAGE_ACK_VALUE -> {
+                // The phone acks the mic stream it accepts: proof the audio reaches it.
+                if (message.channel == Channel.ID_MIC) {
+                    micAcks++
+                    if (micAcks <= 3 || micAcks % 50 == 0) AppLog.i("Mic: phone acknowledged mic data (ack #$micAcks)")
+                }
+                return 0
+            }
             else -> AppLog.e("Unsupported Media message type: ${message.type}")
         }
         return 0
@@ -93,6 +100,10 @@ internal class AapControlMedia(
         aapTransport.send(msg)
 
         if (channel == Channel.ID_VID) {
+            // Grant focus with the config, as reference head units do; the activity broadcast
+            // below only lands when its surface happens to appear after TransportStarted.
+            aapTransport.send(VideoFocusEvent(gain = true, unsolicited = true))
+            AppLog.i("Video focus granted after video sink setup")
             aapTransport.gainVideoFocus()
         }
 
@@ -148,8 +159,11 @@ internal class AapControlMedia(
         return 0
     }
 
+    private var micAcks = 0
+
     private fun micRequest(micRequest: Media.MicrophoneRequest): Int {
-        AppLog.i("Mic request: open=${micRequest.open}")
+        AppLog.i("Mic request: open=${micRequest.open} anc=${micRequest.ancEnabled} ec=${micRequest.ecEnabled} maxUnacked=${micRequest.maxUnacked}")
+        if (micRequest.open) micAcks = 0
 
         val status = if (micRequest.open) {
             val result = micRecorder.start()
@@ -270,6 +284,11 @@ internal class AapControlService(
         private val settings: Settings,
         private val context: Context): AapControl {
 
+    init {
+        ProjectedMedia.onMusicFocusInputsChanged = { reconcileMediaFocus() }
+    }
+
+
     override fun execute(message: AapMessage): Int {
 
         when (message.type) {
@@ -331,6 +350,7 @@ internal class AapControlService(
 
     private fun navigationFocusRequest(request: Control.NavFocusRequestNotification, channel: Int): Int {
         AppLog.i("Navigation Focus Request: %s", request.focusType)
+        com.andrerinas.openheadunit.bridge.AllGoBridgeLink.navigationFocus(gain = request.focusType == Control.NavFocusType.NAV_FOCUS_2)
 
         val response = Control.NavFocusNotification.newBuilder()
                 .setFocusType(Control.NavFocusType.NAV_FOCUS_2)
@@ -359,15 +379,25 @@ internal class AapControlService(
         if (request.status == Control.VoiceSessionNotification.VoiceSessionStatus.VOICE_STATUS_START) {
             AppLog.i("Voice Session Notification: START")
             aapTransport.isAssistantActive = true
+            ProjectedMedia.assistantActive = true
         } else if (request.status == Control.VoiceSessionNotification.VoiceSessionStatus.VOICE_STATUS_STOP) {
             AppLog.i("Voice Session Notification: STOP")
             aapTransport.isAssistantActive = false
+            ProjectedMedia.assistantActive = false
         }
         return 0
     }
 
     private fun audioFocusRequest(notification: Control.AudioFocusRequestNotification, channel: Int): Int {
         AppLog.i("Audio Focus Request: ${notification.request}")
+        val requestType = notification.request
+        ProjectedMedia.phoneTransientFocus = requestType == Control.AudioFocusRequestNotification.AudioFocusRequestType.GAIN_TRANSIENT ||
+            requestType == Control.AudioFocusRequestNotification.AudioFocusRequestType.GAIN_TRANSIENT_MAY_DUCK
+        when (requestType) {
+            Control.AudioFocusRequestNotification.AudioFocusRequestType.GAIN -> ProjectedMedia.phoneWantsMusicFocus = true
+            Control.AudioFocusRequestNotification.AudioFocusRequestType.RELEASE -> ProjectedMedia.phoneWantsMusicFocus = false
+            else -> {}
+        }
 
         // Always respond with the mapped focus state to AA — never deny.
         // the phone must always believe the headunit
@@ -396,14 +426,17 @@ internal class AapControlService(
                 // static path's permanent grab from CommManager, where the answer is the opposite.
                 val isRelease = notification.request.number ==
                         Control.AudioFocusRequestNotification.AudioFocusRequestType.RELEASE_VALUE
-                if (aapAudio.shouldHonourProtocolFocusRequest(isRelease)) {
+                val isMediaGain = notification.request.number ==
+                        Control.AudioFocusRequestNotification.AudioFocusRequestType.GAIN_VALUE
+                focusChannel = channel
+                if (isMediaGain || isRelease) reconcileMediaFocus()
+                // Nav prompts and the Assistant get their own transient focus; only music focus speaks to the phone.
+                if (!isMediaGain && aapAudio.shouldHonourProtocolFocusRequest(isRelease)) {
                     val separate = settings.separateAudioStreams || settings.musicViaBluetooth
                     aapAudio.requestFocusChange(
                         AudioConfigs.stream(channel, separate),
                         notification.request.number,
-                        AudioManager.OnAudioFocusChangeListener {
-                            AppLog.i("System audio focus changed: $it ${systemFocusName[it]}")
-                        },
+                        AudioManager.OnAudioFocusChangeListener { AppLog.i("Transient audio focus changed: $it ${systemFocusName[it]}") },
                     )
                 }
             }
@@ -412,6 +445,41 @@ internal class AapControlService(
         }
 
         return 0
+    }
+
+    /** Holds the car's music focus while the phone wants it, except for the MG4 Radio app (car tuner). */
+    @Volatile private var focusChannel = Channel.ID_CTR
+    // One listener instance: a repeat request is then the same focus client and cannot take focus from itself.
+    private val mediaFocusListener = AudioManager.OnAudioFocusChangeListener { forwardCarFocus(focusChannel, it) }
+
+    @Synchronized
+    private fun reconcileMediaFocus() {
+        val want = settings.enableAudioSink && !settings.staticAudioFocus &&
+            CarRadioPassthroughPolicy.holdsCarMediaFocus(ProjectedMedia.phoneWantsMusicFocus, ProjectedMedia.source) &&
+            aapAudio.shouldHonourProtocolFocusRequest(false)
+        if (want == aapAudio.holdsMediaFocus) return
+        if (want) {
+            aapAudio.holdMediaFocus(mediaFocusListener)
+        } else {
+            AppLog.i("Car music focus released (phone wants it=${ProjectedMedia.phoneWantsMusicFocus}, app=${ProjectedMedia.source})")
+            aapAudio.releaseMediaFocus()
+            ProjectedMedia.lossForwarded = false
+        }
+    }
+
+    /** The car (e.g. its radio) took the music focus: tell the phone, or both play. */
+    private fun forwardCarFocus(channel: Int, change: Int) {
+        AppLog.i("Car music focus changed: $change ${systemFocusName[change]}")
+        // A permanent loss drops us from the car's focus stack; the phone's next GAIN asks again.
+        if (change == AudioManager.AUDIOFOCUS_LOSS) aapAudio.releaseMediaFocus()
+        SystemFocusForwardPolicy.stateFor(settings.musicViaBluetooth, ProjectedMedia.wifiMusicPlaying,
+            ProjectedMedia.phoneTransientFocus, ProjectedMedia.lossForwarded, change)?.let { state ->
+            AppLog.i("Forwarding car audio focus to the phone: $state")
+            ProjectedMedia.lossForwarded = state != Control.AudioFocusNotification.AudioFocusStateType.STATE_GAIN
+            val update = Control.AudioFocusNotification.newBuilder().setFocusState(state).build()
+            aapTransport.send(AapMessage(channel, Control.ControlMsgType.MESSAGE_AUDIO_FOCUS_NOTIFICATION_VALUE, update))
+            aapTransport.onAudioFocusStateChanged?.invoke(state == Control.AudioFocusNotification.AudioFocusStateType.STATE_GAIN)
+        }
     }
 
     companion object {
@@ -440,7 +508,11 @@ internal class AapControlGateway(
         private val serviceControl: AapControl,
         private val mediaControl: AapControl,
         private val touchControl: AapControl,
-        private val sensorControl: AapControl): AapControl {
+        private val sensorControl: AapControl,
+        private val bluetoothControl: AapControl? = null): AapControl {
+
+    // Every control message for the first part of a session; enough to see how a session ends.
+    private var rxLogged = 0
 
     constructor(aapTransport: AapTransport,
                 micRecorder: MicRecorder,
@@ -451,9 +523,14 @@ internal class AapControlGateway(
             AapControlService(aapTransport, aapAudio, settings, context),
             AapControlMedia(aapTransport, micRecorder, aapAudio),
             AapControlTouch(aapTransport),
-            AapControlSensor(aapTransport, context, settings))
+            AapControlSensor(aapTransport, context, settings),
+            AapControlBluetooth(aapTransport, context))
 
     override fun execute(message: AapMessage): Int {
+        if (rxLogged < RX_LOG_LIMIT) {
+            rxLogged++
+            AppLog.i("RX: channel=${Channel.name(message.channel)} type=${message.type} size=${message.size}")
+        }
         if (message.type == 7) {
             val request = message.parse(Control.ChannelOpenRequest.newBuilder()).build()
             return channelOpenRequest(request, message.channel)
@@ -464,8 +541,13 @@ internal class AapControlGateway(
             Channel.ID_INP -> return touchControl.execute(message)
             Channel.ID_SEN -> return sensorControl.execute(message)
             Channel.ID_VID, Channel.ID_AUD, Channel.ID_AU1, Channel.ID_AU2, Channel.ID_MIC -> return mediaControl.execute(message)
+            Channel.ID_BTH -> return bluetoothControl?.execute(message) ?: 0
         }
         return 0
+    }
+
+    private companion object {
+        const val RX_LOG_LIMIT = 300
     }
 
     private fun channelOpenRequest(request: Control.ChannelOpenRequest, channel: Int): Int {

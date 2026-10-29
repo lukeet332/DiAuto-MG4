@@ -5,26 +5,54 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
 import com.andrerinas.openheadunit.aap.AapService
-import com.andrerinas.openheadunit.aap.BootLoopPolicy
 import com.andrerinas.openheadunit.utils.AppLog
 import com.andrerinas.openheadunit.utils.Settings
 import android.os.UserManager
 import android.os.Build
+import android.os.SystemClock
 
 class BootCompleteReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
-        val action = intent.action
+        val action = intent.action ?: return
         if (action !in BOOT_ACTIONS) return
 
         AppLog.i("Boot auto-start: received action=$action")
 
-        val isLocked = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && 
-                      !(context.getSystemService(Context.USER_SERVICE) as UserManager).isUserUnlocked
-
-        if (isLocked) {
+        if (isLocked(context)) {
             AppLog.w("BootCompleteReceiver: Device is locked. Cannot start AapService yet. Waiting for user unlock.")
+            // USER_UNLOCKED never reaches manifest receivers, and on the MG4 BOOT_COMPLETED lands
+            // ~12s after unlock, so watch for the unlock ourselves.
+            if (action == Intent.ACTION_LOCKED_BOOT_COMPLETED) awaitUnlock(context.applicationContext)
             return
+        }
+        start(context, action)
+    }
+
+    private fun isLocked(context: Context): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
+            !(context.getSystemService(Context.USER_SERVICE) as UserManager).isUserUnlocked
+
+    private fun awaitUnlock(context: Context) {
+        val pending = goAsync()
+        Thread {
+            try {
+                val deadline = SystemClock.elapsedRealtime() + UNLOCK_WAIT_MS
+                while (isLocked(context) && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(UNLOCK_POLL_MS)
+                if (!isLocked(context)) start(context, Intent.ACTION_USER_UNLOCKED)
+            } finally {
+                pending.finish()
+            }
+        }.start()
+    }
+
+    private fun start(context: Context, action: String) {
+        synchronized(BootCompleteReceiver::class.java) {
+            if (!BootStartPolicy.shouldStart(action, startedThisBoot)) {
+                AppLog.i("Boot auto-start: already started this boot, ignoring $action")
+                return
+            }
+            if (BootStartPolicy.isOncePerBoot(action)) startedThisBoot = true
         }
 
         val bootEnabled = Settings.isAutoStartOnBootEnabled(context)
@@ -33,14 +61,7 @@ class BootCompleteReceiver : BroadcastReceiver() {
         val wifiEnabled = Settings.isAutoStartOnWifiEnabled(context)
 
         if (bootEnabled) {
-            // Take a strike before starting. The service clears it once this run has lasted long
-            // enough to count as healthy; if the device dies first, the strike stands and the next
-            // boot is one closer to pausing wireless bring-up. Counted here rather than in the
-            // service because only this side knows the start came from a boot — EXTRA_BOOT_START
-            // does not reach AapService until onStartCommand, after onCreate has already run.
-            val strikes = BootLoopPolicy.nextStrikes(Settings.getBootLoopStrikes(context))
-            Settings.setBootLoopStrikes(context, strikes)
-            AppLog.i("Boot auto-start: starting AapService with BOOT_START (trigger=$action, boot-start #$strikes since the last healthy run)")
+            AppLog.i("Boot auto-start: starting AapService with BOOT_START (trigger=$action)")
             val serviceIntent = Intent(context, AapService::class.java).apply {
                 putExtra(EXTRA_BOOT_START, true)
             }
@@ -73,12 +94,21 @@ class BootCompleteReceiver : BroadcastReceiver() {
 
     companion object {
         const val EXTRA_BOOT_START = "com.andrerinas.openheadunit.EXTRA_BOOT_START"
+        private const val UNLOCK_POLL_MS = 100L
+        private const val UNLOCK_WAIT_MS = 30_000L
+
+        /** Per process, and so per boot: the broadcasts of one boot all land in the same process. */
+        @Volatile private var startedThisBoot = false
+
+        fun handles(action: String): Boolean = action in BOOT_ACTIONS
 
         private val BOOT_ACTIONS = setOf(
             // Standard Android boot
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_LOCKED_BOOT_COMPLETED,
             Intent.ACTION_USER_UNLOCKED,
+            // An update force-stops the app; without this nothing brings Android Auto back.
+            Intent.ACTION_MY_PACKAGE_REPLACED,
             // Generic / OEM quick boot
             "android.intent.action.QUICKBOOT_POWERON",
             "com.htc.intent.action.QUICKBOOT_POWERON",

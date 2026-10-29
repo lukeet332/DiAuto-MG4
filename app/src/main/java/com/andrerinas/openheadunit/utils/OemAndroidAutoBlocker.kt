@@ -39,7 +39,7 @@ object OemAndroidAutoBlocker {
         lastBlockAt = now
 
         var stopped = 0
-        for (pkg in TARGET_PACKAGES) {
+        for (pkg in stopTargets { isDiAutoBridge(context, it) }) {
             if (!isInstalled(context, pkg)) continue
             if (forceStop(context, pkg)) {
                 stopped++
@@ -49,6 +49,16 @@ object OemAndroidAutoBlocker {
         if (stopped == 0) {
             AppLog.d("OemAndroidAutoBlocker: no OEM AA packages to stop ($reason)")
         }
+    }
+
+    /** The DiAuto bridge installed over AllGo Android Auto feeds the car's hub, so it must keep running. */
+    fun stopTargets(isDiAutoBridge: (String) -> Boolean): List<String> = TARGET_PACKAGES.filterNot(isDiAutoBridge)
+
+    private fun isDiAutoBridge(context: Context, packageName: String): Boolean = try {
+        context.packageManager.getApplicationInfo(packageName, PackageManager.GET_META_DATA)
+            .metaData?.getBoolean("com.drivehub.diauto.bridge") == true
+    } catch (_: Exception) {
+        false
     }
 
     private fun isInstalled(context: Context, packageName: String): Boolean {

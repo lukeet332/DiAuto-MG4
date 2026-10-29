@@ -56,8 +56,15 @@ object KeyCode {
         224, // KEYCODE_WAKEUP → Voice Command
         264, 265, 267, // STEM_PRIMARY, STEM_1, STEM_3 (steering wheel)
         268, 269, 270, 271, // Rotary controller
-        65536, 65537, 65538 // Rotary controller
+        65536, 65537, 65538, // Rotary controller
+        65540, // TEL: the car's phone button, via the AllGo bridge
     ).distinct().sorted()
+
+    /** Any key event, even KEYCODE_UNKNOWN, takes Android Auto out of touch mode and shows its focus ring. */
+    fun shouldSendToAndroidAuto(aapKeyCode: Int): Boolean = aapKeyCode != KeyEvent.KEYCODE_UNKNOWN
+
+    /** Android Auto's own extended keys (scroll wheel, MEDIA, NAVIGATION, RADIO, TEL, ...). */
+    fun isAndroidAutoExtendedKey(keyCode: Int): Boolean = keyCode in 65536..65543
 
     val KeyEvent.isMediaSessionKey: Boolean
         get() = keyCode == KeyEvent.KEYCODE_MEDIA_PLAY ||

@@ -2,8 +2,8 @@
 
 <resources>
 
-    <!-- Match all devices -->
-    <usb-device />
+    <!-- Accessory-mode phones only: matching every device made Android offer DiAuto the car's own
+         USB devices (TBox modem, DAB tuner) at boot, with a confirm dialog. -->
 
     <usb-device vendor-id="6353" product-id="11520" />
     <usb-device vendor-id="6353" product-id="11521" />

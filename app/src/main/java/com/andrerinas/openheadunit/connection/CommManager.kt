@@ -435,7 +435,8 @@ class CommManager(
                     _connectionState.emit(
                         ConnectionState.Error(if (silent) ERROR_HANDSHAKE_PEER_SILENT else "Handshake failed")
                     )
-                    disconnect()
+                    // A failed handshake is not the user leaving: that path stops wireless for good.
+                    disconnect(isUserExit = false)
                 }
             } else {
                 _connectionState.emit(ConnectionState.Error("Starting handshake without connection"))
@@ -445,7 +446,7 @@ class CommManager(
             // to age into a backoff that no longer describes what is happening.
             noteHandshakeOutcome(silent = false)
             _connectionState.emit(ConnectionState.Error("Handshake failed: ${e.message}"))
-            disconnect()
+            disconnect(isUserExit = false)
         }
     }
 
@@ -600,7 +601,7 @@ class CommManager(
         // If the key is proprietary (internal ID > 1000) and NOT mapped, we drop it.
         // These keys are intended to be learned/mapped in the Keymap settings.
         // Sending them directly to AA would result in KEYCODE_UNKNOWN.
-        if (keyCode >= 1000 && logicalCode == keyCode) {
+        if (keyCode >= 1000 && logicalCode == keyCode && !com.andrerinas.openheadunit.aap.KeyCode.isAndroidAutoExtendedKey(keyCode)) {
             AppLog.v("CommManager: Ignoring unmapped proprietary key $keyCode")
             return
         }
@@ -804,6 +805,17 @@ class CommManager(
     }
 
     /** After Wi‑Fi AA drops A2DP, re-take system focus if media was already playing. */
+    /** Android Auto music is the car's source (DiAuto holds the car's music focus). */
+    fun holdsCarMusicFocus(): Boolean = _transport?.aapAudio?.holdsMediaFocus == true
+
+    fun discardMediaAudio() {
+        _transport?.aapAudio?.discardMediaAudio()
+    }
+
+    fun resumeMediaAudio() {
+        _transport?.aapAudio?.resumeMediaAudio()
+    }
+
     fun reclaimPlaybackFocusIfNeeded() {
         _transport?.aapAudio?.reclaimPlaybackFocusIfNeeded()
     }

@@ -70,8 +70,8 @@ android {
         applicationId = "com.drivehub.diauto.mg4"
         minSdk = 28
         targetSdk = 36
-        versionCode = 25
-        versionName = "1.9.6"
+        versionCode = 81
+        versionName = "1.9.6-wireless56-60fps"
         setProperty("archivesBaseName", "${applicationId}_${versionName}")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         multiDexEnabled = true
@@ -299,3 +299,15 @@ dependencies {
     implementation("dev.rikka.shizuku:provider:13.1.5")
     implementation("com.github.topjohnwu.libsu:core:6.0.0")
 }
+
+// The car build carries the AllGo bridge and installs it itself (AllGoBridgeInstaller).
+val bridgeAssetsDir = layout.buildDirectory.dir("generated/allgoBridgeAssets")
+val copyAllGoBridge by tasks.registering(Copy::class) {
+    dependsOn(":allgobridge:assembleRelease")
+    from(project(":allgobridge").layout.buildDirectory.file("outputs/apk/release/allgobridge-release.apk"))
+    into(bridgeAssetsDir)
+    rename { "allgo-bridge.apk" }
+}
+android.sourceSets.getByName("car").assets.srcDir(bridgeAssetsDir)
+tasks.matching { it.name.startsWith("merge") && it.name.contains("Car") && it.name.endsWith("Assets") }
+    .configureEach { dependsOn(copyAllGoBridge) }

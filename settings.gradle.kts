@@ -1,7 +1,7 @@
 import org.gradle.kotlin.dsl.maven
 import org.gradle.kotlin.dsl.repositories
 
-include(":app", ":contract", ":evhardware")
+include(":app", ":contract", ":evhardware", ":allgobridge", ":hubsim")
 
 rootProject.name = "DiAuto-MG4"
 

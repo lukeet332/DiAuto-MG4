@@ -38,6 +38,14 @@ class AudioDecoder {
         audioTracks.put(chan, null)
     }
 
+    fun discardBuffered(chan: Int) {
+        audioTracks.get(chan)?.discardBuffered()
+    }
+
+    fun resumeAfterPause(chan: Int) {
+        audioTracks.get(chan)?.resumeAfterPause()
+    }
+
     fun releaseMixer() {
         synchronized(this) {
             mixer?.stop()

@@ -102,6 +102,7 @@ class AapService : Service(), UsbReceiver.Listener {
 
     // SupervisorJob prevents a child coroutine failure from cancelling the whole scope
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var stationRestoreJob: Job? = null
 
     private lateinit var uiModeManager: UiModeManager
     private lateinit var usbReceiver: UsbReceiver
@@ -392,6 +393,7 @@ class AapService : Service(), UsbReceiver.Listener {
     private fun onAaMediaMetadataFromPhone(meta: MediaPlayback.MediaMetaData) {
         if (isDestroying) return
         lastAaMediaMetadata = meta
+        com.andrerinas.openheadunit.bridge.AllGoBridgeLink.nowPlaying(meta)
         if (!App.provide(this).settings.syncMediaSessionWithAaMetadata) return
         // Avoid showing a previous track's art with new title/artist until decode finishes.
         cachedAaAlbumArtBitmap = null
@@ -404,7 +406,25 @@ class AapService : Service(), UsbReceiver.Listener {
             lastAaPlaybackPositionMs = status.playbackSeconds.protoUint32ToLong() * 1000L
         }
         val isPlayingFromStatus = resolveIsPlayingFromStatus(status)
+        // The phone's "audio stop" follows a pause by seconds; without this the car plays out its buffer first.
+        if (status.hasState() && lastAaPlaybackIsPlaying != false &&
+            com.andrerinas.openheadunit.decoder.AudioStopPolicy.discardOnPlaybackStatus(status.state.number)
+        ) {
+            AppLog.i("AapService: phone paused music - dropping the buffered audio")
+            commManager.discardMediaAudio()
+        } else if (status.hasState() && com.andrerinas.openheadunit.decoder.AudioStopPolicy.resumeOnPlaybackStatus(status.state.number)) {
+            commManager.resumeMediaAudio()
+        }
         lastAaPlaybackIsPlaying = isPlayingFromStatus
+        if (status.hasMediaSource() && status.mediaSource != ProjectedMedia.source) {
+            AppLog.i("AapService: Android Auto media app is now '${status.mediaSource}'")
+            ProjectedMedia.phoneWantsMusicFocus = CarRadioPassthroughPolicy.phoneWantsMusicAfterSourceChange(
+                ProjectedMedia.phoneWantsMusicFocus, ProjectedMedia.source)
+            ProjectedMedia.source = status.mediaSource
+            ProjectedMedia.onMusicFocusInputsChanged?.invoke()
+        }
+        com.andrerinas.openheadunit.bridge.AllGoBridgeLink.playback(isPlayingFromStatus)
+        com.andrerinas.openheadunit.bridge.AllGoBridgeLink.playState(status)
         mediaSessionIsPlaying = isPlayingFromStatus
 
         if (!App.provide(this).settings.syncMediaSessionWithAaMetadata) return
@@ -789,6 +809,15 @@ class AapService : Service(), UsbReceiver.Listener {
         AppLog.init(settings, this)
         syncLogBackendState()
         com.andrerinas.openheadunit.utils.OemAndroidAutoBlocker.blockIfEnabled(this, "service-start")
+        com.andrerinas.openheadunit.bridge.AllGoBridgeInstaller.sync(this)
+        // A car Wi-Fi paused for a session stays off if that session never ended cleanly (the car
+        // shut down mid-session, 2026-10-19); give it back at start when no session is up.
+        serviceScope.launch(Dispatchers.IO) {
+            if (!commManager.isConnected) HotspotManager.restorePausedStation(this@AapService)
+        }
+        com.andrerinas.openheadunit.bridge.AllGoBridgeLink.start(this)
+        // App.onCreate skips this when the boot start creates the process before unlock.
+        if (settings.batteryForGoogleMaps) com.andrerinas.openheadunit.vehicle.Mg4EnergyProvider.start(this)
 
         nativeAaHandshakeManager = NativeAaHandshakeManager(this, serviceScope)
         wifiDirectManager = WifiDirectManager(this)
@@ -822,14 +851,11 @@ class AapService : Service(), UsbReceiver.Listener {
             AppLog.i("AapService: Google Nearby disabled: GSF gservices provider is unavailable")
         }
 
-        // Decided here as well as inside initWifiMode() so a paused start skips the wait-for-WiFi
-        // machinery entirely rather than setting it up and being turned away at the end of it.
-        if (applyBootLoopGuard()) {
-            AppLog.w("AapService: Wireless bring-up paused by the boot-loop guard. USB and the rest of the app are unaffected.")
-        } else {
-            initWifiModeWithOptionalWait()
-        }
-        scheduleBootLoopStrikeClear()
+        // A pause saved by the boot-loop guard (removed: on the MG4 it misread short ignition cycles
+        // as crashes and kept the hotspot off) must not outlive it.
+        Settings.clearBootLoopState(this)
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(BOOT_LOOP_NOTIFICATION_ID)
+        initWifiModeWithOptionalWait()
         wifiDirectManager?.setCredentialsListener { ssid, psk, ip, bssid ->
             onNativeCredentials(ssid, psk, ip, bssid)
         }
@@ -889,7 +915,12 @@ class AapService : Service(), UsbReceiver.Listener {
         serviceScope.launch {
             commManager.connectionState.collect { state ->
                 when (state) {
-                    is CommManager.ConnectionState.Connected -> onConnected()
+                    is CommManager.ConnectionState.Connected -> {
+                        // Set here, not only at TransportStarted, so a first session that fails its
+                        // handshake still runs onDisconnected and re-arms the wireless listeners.
+                        hasEverConnected = true
+                        onConnected()
+                    }
                     is CommManager.ConnectionState.HandshakeComplete -> {
                         automaticReconnectAttempts = 0
                         launchAapProjectionActivity()
@@ -1149,93 +1180,14 @@ class AapService : Service(), UsbReceiver.Listener {
                 )
                 delay(3_000L)
             }
-            // Radio keeps SAIC amp priority even while DiAuto decodes Wi‑Fi PCM. Pause the
-            // tuner, claim the Allgo-style AA media source (SRC_AA), then re-take Android
-            // focus now that A2DP is gone (AUTO skipped it earlier).
-            silenceSaicRadioForWifiAudio()
-            claimSaicAndroidAutoMediaSource()
-            commManager.reclaimPlaybackFocusIfNeeded()
         }
     }
 
-    /**
-     * Claim Android Auto as the car media source so the amp leaves radio/BT.
-     * SWI68 CPAA binder when present; on eh32 [SaicCarAudioSource] AudioFocus + type 70.
-     */
-    private suspend fun claimSaicAndroidAutoMediaSource() {
-        try {
-            SaicMediaPlayer.connectProjection(this)
-            repeat(12) { attempt ->
-                if (SaicMediaPlayer.switchToAndroidAuto()) {
-                    AppLog.i(
-                        "AapService: car media source switched to Android Auto " +
-                            "(attempt ${attempt + 1})",
-                    )
-                    withContext(Dispatchers.Main) {
-                        updateMediaSessionState(true)
-                        if (lastAaMediaMetadata == null) applyPlaceholderMediaMetadata()
-                    }
-                    return
-                }
-                delay(250)
-            }
-            AppLog.w("AapService: could not switch car to AA media source")
-        } catch (e: Exception) {
-            AppLog.w("AapService: AA media source switch failed: ${e.message}")
-        }
-    }
-
-    /**
-     * Allgo-style AA medya yayını for Wi‑Fi music: pause radio, claim SRC_AA immediately,
-     * then re-claim while the session stays up if the car drifts back to radio/BT.
-     */
+    /** Music focus now follows stock AllGo (AapControl): one GAIN while the phone asks for it. */
     private fun startSaicAndroidAutoMediaPublication() {
         saicAaMediaClaimJob?.cancel()
+        ProjectedMedia.reset()
         if (settings.musicViaBluetooth) return
-        saicAaMediaClaimJob = serviceScope.launch(Dispatchers.IO) {
-            silenceSaicRadioForWifiAudio()
-            claimSaicAndroidAutoMediaSource()
-            while (isActive) {
-                delay(8_000L)
-                if (settings.musicViaBluetooth) return@launch
-                when (commManager.connectionState.value) {
-                    is CommManager.ConnectionState.Disconnected,
-                    is CommManager.ConnectionState.Error -> return@launch
-                    else -> Unit
-                }
-                if (SaicMediaPlayer.isAndroidAutoSource()) continue
-                AppLog.i("AapService: SAIC source left Android Auto — re-claiming (Allgo-style publish)")
-                silenceSaicRadioForWifiAudio()
-                claimSaicAndroidAutoMediaSource()
-            }
-        }
-    }
-
-    /**
-     * MG4 amp follows the SAIC media source. While radio is playing, Wi‑Fi AA AudioTrack
-     * does not become the audible source — [SaicRadio.pause] is the launcher's mute path.
-     */
-    private suspend fun silenceSaicRadioForWifiAudio() {
-        try {
-            SaicRadio.connect(this)
-            repeat(8) { attempt ->
-                val playing = SaicRadio.isPlaying()
-                if (playing == false) {
-                    AppLog.i("AapService: SAIC radio already paused (attempt ${attempt + 1})")
-                    return
-                }
-                val ok = SaicRadio.pause()
-                AppLog.i(
-                    "AapService: pause SAIC radio for Wi‑Fi AA audio " +
-                        "attempt=${attempt + 1} ok=$ok playingWas=$playing",
-                )
-                if (ok) return
-                delay(250)
-            }
-            AppLog.w("AapService: could not pause SAIC radio (service not ready)")
-        } catch (e: Exception) {
-            AppLog.w("AapService: pause SAIC radio failed: ${e.message}")
-        }
     }
 
     private fun launchAapProjectionActivity() {
@@ -1382,6 +1334,13 @@ class AapService : Service(), UsbReceiver.Listener {
      */
     private fun onDisconnected(state: CommManager.ConnectionState.Disconnected) {
         com.andrerinas.openheadunit.hud.BydNavigationOutputs.stop()
+        com.andrerinas.openheadunit.hud.SaicClusterNavigation.stop()
+        // Give the car Wi-Fi back once wireless Android Auto has stayed down for a while.
+        stationRestoreJob?.cancel()
+        stationRestoreJob = serviceScope.launch(Dispatchers.IO) {
+            delay(HotspotManager.STATION_RESTORE_DELAY_MS)
+            if (!commManager.isBusy) HotspotManager.restorePausedStation(this@AapService)
+        }
         isSwitchingToAccessory.set(false)
         releaseWifiLock()
 
@@ -1431,7 +1390,11 @@ class AapService : Service(), UsbReceiver.Listener {
                     nativeAaHandshakeManager?.stop()
                     serviceScope.launch {
                         delay(1500) // Give hardware time to settle before re-initializing P2P
-                        if (!preemptingWirelessForUsb && !isSwitchingToAccessory.get()) {
+                        if (commManager.isBusy) {
+                            // The phone reconnects within ~300 ms; re-initialising now would tear
+                            // down the Bluetooth handshake server under the new session.
+                            AppLog.i("AapService: a new session is already up - skipping the delayed wireless re-init")
+                        } else if (!preemptingWirelessForUsb && !isSwitchingToAccessory.get()) {
                             initWifiMode(force = true)
                         }
                     }
@@ -1880,15 +1843,6 @@ class AapService : Service(), UsbReceiver.Listener {
 
     /** Starts [WirelessServer] if the user has configured server WiFi mode. */
     private fun initWifiMode(force: Boolean = false) {
-        // Every automatic entry point lands here, including the Bluetooth auto-start that fires
-        // when the phone comes into range — which on a looping unit would walk straight back into
-        // the crash the guard was set to avoid. Explicit user actions release the pause first, so
-        // this only ever blocks a start nobody asked for.
-        if (Settings.isWirelessPausedByBootLoop(this)) {
-            AppLog.w("AapService: Wireless bring-up requested, but it is paused by the boot-loop guard. Open the app to re-enable it.")
-            return
-        }
-
         val settings = App.provide(this).settings
         val mode = settings.wifiConnectionMode
         val strategy = settings.helperConnectionStrategy
@@ -1969,6 +1923,11 @@ class AapService : Service(), UsbReceiver.Listener {
                         // Read this device's own access point instead of hosting a P2P group. The AP
                         // itself is the user's to switch on; the provider only resolves and watches it.
                         AppLog.i("AapService: Native AA on the head unit hotspot — resolving access point credentials.")
+                        serviceScope.launch(Dispatchers.IO) {
+                            HotspotManager.ensure5GhzBeforeSession(this@AapService)
+                        }
+                        // The MG4 Radio app on the phone reaches the car radio through this.
+                        com.andrerinas.openheadunit.radio.RadioBridgeServer.start(this@AapService)
                         softApCredentialsProvider?.start()
                     } else {
                         // Start WiFi Direct as a "quiet host" (P2P Group for phone to join)
@@ -2038,6 +1997,7 @@ class AapService : Service(), UsbReceiver.Listener {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         com.andrerinas.openheadunit.hud.BydNavigationOutputs.stop()
+        com.andrerinas.openheadunit.hud.SaicClusterNavigation.stop()
         AppLog.i("AapService: onTaskRemoved — attempting restart")
         try {
             val restartIntent = Intent(this, AapService::class.java)
@@ -2049,7 +2009,10 @@ class AapService : Service(), UsbReceiver.Listener {
     }
 
     override fun onDestroy() {
+        com.andrerinas.openheadunit.bridge.AllGoBridgeLink.stop(this)
+        com.andrerinas.openheadunit.radio.RadioBridgeServer.stop(this)
         com.andrerinas.openheadunit.hud.BydNavigationOutputs.stop()
+        com.andrerinas.openheadunit.hud.SaicClusterNavigation.stop()
         AppLog.i("AapService destroying... (wakeLock held=${bootWakeLock?.isHeld == true})")
         isDestroying = true
         mediaMetadataDecodeJob?.cancel()
@@ -2183,12 +2146,7 @@ class AapService : Service(), UsbReceiver.Listener {
 
         when (intent?.action) {
             ACTION_START_SELF_MODE       -> startSelfMode()
-            ACTION_START_WIRELESS        -> {
-                // Asked for from the UI, so the user is present: release the boot-loop pause
-                // rather than silently ignoring them.
-                Settings.clearBootLoopState(this)
-                initWifiMode()
-            }
+            ACTION_START_WIRELESS        -> initWifiMode()
             ACTION_START_WIRELESS_SCAN   -> {
                 val settings = App.provide(this).settings
                 val mode = settings.wifiConnectionMode
@@ -2197,7 +2155,6 @@ class AapService : Service(), UsbReceiver.Listener {
                 // [FIX] Reset exit flags on manual scan start
                 userExitedAA = false
                 userExitCooldownUntil = 0L
-                Settings.clearBootLoopState(this)
                 initWifiMode(force = true)
 
                 if (mode == 2 && strategy == 2) {
@@ -3344,89 +3301,6 @@ class AapService : Service(), UsbReceiver.Listener {
     // -------------------------------------------------------------------------
     // Boot-loop guard
     // -------------------------------------------------------------------------
-
-    /**
-     * Whether to skip wireless bring-up because starting it appears to be crashing the device, and
-     * posts the notice explaining that if so.
-     *
-     * See [BootLoopPolicy]. The decision is taken from the strike count the receiver has already
-     * written, so it needs nothing from the start intent and can run here in onCreate.
-     */
-    private fun applyBootLoopGuard(): Boolean {
-        if (Settings.isWirelessPausedByBootLoop(this)) {
-            AppLog.w("AapService: Wireless is still paused from an earlier boot loop. Open the app to re-enable it.")
-            notifyBootLoopPause()
-            return true
-        }
-        val strikes = Settings.getBootLoopStrikes(this)
-        if (!BootLoopPolicy.shouldPauseWireless(strikes)) return false
-
-        AppLog.w(
-            "AapService: $strikes boot-started runs in a row ended before " +
-                "${BootLoopPolicy.HEALTHY_RUN_MS / 1000}s. Pausing wireless bring-up — on some head units " +
-                "the WiFi stack takes the whole system down when a phone joins, and auto-start then " +
-                "repeats it forever."
-        )
-        Settings.setWirelessPausedByBootLoop(this, true)
-        notifyBootLoopPause()
-        return true
-    }
-
-    /**
-     * Clears the strikes once this run has lasted long enough to count as healthy.
-     *
-     * Deliberately time-based rather than hung off a successful connection: on the head unit this
-     * guard was written for, one cycle reached a complete projection session with audio playing and
-     * the system died anyway, so a connection-based signal would reset the count every pass.
-     */
-    private fun scheduleBootLoopStrikeClear() {
-        if (Settings.getBootLoopStrikes(this) == 0) return
-        serviceScope.launch {
-            delay(BootLoopPolicy.HEALTHY_RUN_MS)
-            AppLog.i("AapService: This run has lasted ${BootLoopPolicy.HEALTHY_RUN_MS / 1000}s. Clearing the boot-loop strikes.")
-            Settings.setBootLoopStrikes(this@AapService, 0)
-        }
-    }
-
-    /**
-     * Tells the user wireless was left off and what to do about it. Names the WiFi Direct join when
-     * that is the configuration, because on the units this happens to, switching the Native AA
-     * transport to the head unit's own hotspot avoids the P2P path altogether.
-     */
-    private fun notifyBootLoopPause() {
-        val settings = App.provide(this).settings
-        val onNativeWifiDirect = settings.wifiConnectionMode == 3 &&
-            NativeTransport.fromSetting(settings.nativeApTransport) == NativeTransport.WIFI_DIRECT
-        val text = getString(
-            if (onNativeWifiDirect) R.string.boot_loop_paused_native_wifi_direct
-            else R.string.boot_loop_paused_generic
-        )
-
-        val launchIntent = Intent(this, MainActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            putExtra(MainActivity.EXTRA_LAUNCH_SOURCE, "Boot-loop guard")
-        }
-        val piFlags = PendingIntent.FLAG_UPDATE_CURRENT or
-            (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
-        val pi = PendingIntent.getActivity(this, 201, launchIntent, piFlags)
-
-        val notification = NotificationCompat.Builder(this, App.bootStartChannel)
-            .setSmallIcon(R.drawable.ic_stat_aa)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setContentTitle(getString(R.string.boot_loop_paused_title))
-            .setContentText(text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-            .setContentIntent(pi)
-            .setAutoCancel(true)
-            .build()
-
-        try {
-            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
-                .notify(BOOT_LOOP_NOTIFICATION_ID, notification)
-        } catch (e: Exception) {
-            AppLog.w("AapService: Could not post the boot-loop notice: ${e.message}")
-        }
-    }
 
     // -------------------------------------------------------------------------
     // Self Mode

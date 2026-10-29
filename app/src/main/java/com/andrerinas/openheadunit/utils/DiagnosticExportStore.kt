@@ -36,13 +36,19 @@ internal object DiagnosticExportStore {
     }
 
     fun write(resolver: ContentResolver, uri: Uri, report: String) {
-        val stream = resolver.openOutputStream(uri, "wt")
+        val descriptor = resolver.openFileDescriptor(uri, "wt")
             ?: throw IOException("Report destination is unavailable")
-        // UTF-8 with BOM so Windows Notepad recognises the encoding instead of showing
-        // mojibake / refusing to open after the report is shared from the head unit.
-        stream.bufferedWriter(Charsets.UTF_8).use { writer ->
-            writer.write("\uFEFF")
-            writer.write(report)
+        descriptor.use { pfd ->
+            java.io.FileOutputStream(pfd.fileDescriptor).use { stream ->
+                // UTF-8 with BOM so Windows Notepad recognises the encoding instead of showing
+                // mojibake / refusing to open after the report is shared from the head unit.
+                stream.write("\uFEFF".toByteArray(Charsets.UTF_8))
+                stream.write(report.toByteArray(Charsets.UTF_8))
+                stream.flush()
+                // Commit to the USB stick now: Android caches the write, and a stick pulled
+                // before writeback keeps a 0-byte report.
+                pfd.fileDescriptor.sync()
+            }
         }
     }
 }

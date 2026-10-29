@@ -60,6 +60,8 @@ internal class AapAudio(
         }
 
     private var audioFocusRequest: AudioFocusRequest? = null
+    @Volatile
+    private var mediaFocusRequest: AudioFocusRequest? = null
     private var legacyFocusListener: AudioManager.OnAudioFocusChangeListener? = null
 
     @Volatile
@@ -168,6 +170,28 @@ internal class AapAudio(
         return honour
     }
 
+    val holdsMediaFocus: Boolean get() = mediaFocusRequest != null
+
+    /** The car's music focus, tagged Android Auto (70), as stock AllGo's mFocusRequest. */
+    fun holdMediaFocus(listener: AudioManager.OnAudioFocusChangeListener): Boolean {
+        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(SaicCarAudioSource.mediaAttributes())
+            .setWillPauseWhenDucked(false)
+            .setOnAudioFocusChangeListener(listener)
+            .build()
+        val granted = mediaAudioManager.requestAudioFocus(request) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        AppLog.i("AapAudio: car music focus ${if (granted) "GRANTED" else "FAILED"}")
+        if (granted) mediaFocusRequest = request
+        return granted
+    }
+
+    fun releaseMediaFocus() {
+        val request = mediaFocusRequest ?: return
+        mediaFocusRequest = null
+        AppLog.i("AapAudio: releasing car music focus")
+        runCatching { mediaAudioManager.abandonAudioFocusRequest(request) }
+    }
+
     fun requestFocusChange(stream: Int, focusRequest: Int, callback: AudioManager.OnAudioFocusChangeListener): Int {
         // Notification/voice GAIN_TRANSIENT pauses A2DP (AVRCP) on this HU; duck instead.
         val effectiveFocus =
@@ -193,24 +217,10 @@ internal class AapAudio(
                 audioFocusRequest = null
                 result = AudioManager.AUDIOFOCUS_REQUEST_GRANTED
             } else {
-                val usage = when (stream) {
-                    AudioManager.STREAM_NOTIFICATION -> AudioAttributes.USAGE_NOTIFICATION
-                    AudioManager.STREAM_VOICE_CALL -> AudioAttributes.USAGE_VOICE_COMMUNICATION
-                    else -> AudioAttributes.USAGE_MEDIA
-                }
-
-                val audioAttributes = if (usage == AudioAttributes.USAGE_MEDIA) {
-                    // Tag MEDIA focus as AA (70) so MG4 eh32 amp leaves radio/BT for Wi‑Fi PCM.
-                    SaicCarAudioSource.mediaAttributes()
-                } else {
-                    AudioAttributes.Builder()
-                        .setUsage(usage)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                }
-
-                val focusAm =
-                    if (usage == AudioAttributes.USAGE_MEDIA) mediaAudioManager else audioManager
+                // The phone's short requests are a nav prompt or the assistant (stock: usage 12 / 16, no source).
+                val attrs = AaAudioUsagePolicy.forFocusRequest(focusRequest)
+                val audioAttributes = AaAudioUsagePolicy.audioAttributes(attrs)
+                val focusAm = if (attrs.carSourceType != null) mediaAudioManager else audioManager
                 audioFocusRequest = AudioFocusRequest.Builder(effectiveFocus)
                         .setAudioAttributes(audioAttributes)
                         .setWillPauseWhenDucked(false)
@@ -257,19 +267,7 @@ internal class AapAudio(
             AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val attrs = if (speech) {
-                val usage = if (channel == Channel.ID_AU1) {
-                    AudioAttributes.USAGE_VOICE_COMMUNICATION
-                } else {
-                    AudioAttributes.USAGE_NOTIFICATION
-                }
-                AudioAttributes.Builder()
-                    .setUsage(usage)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            } else {
-                SaicCarAudioSource.mediaAttributes()
-            }
+            val attrs = AaAudioUsagePolicy.audioAttributes(AaAudioUsagePolicy.forChannel(channel, ProjectedMedia.assistantActive))
             val focusAm = if (speech) audioManager else mediaAudioManager
             val request = AudioFocusRequest.Builder(focusGain)
                     .setAudioAttributes(attrs)
@@ -323,6 +321,14 @@ internal class AapAudio(
      * After the Wi‑Fi media path drops A2DP, call this so the car radio does not keep the amp
      * for the rest of the session.
      */
+    fun discardMediaAudio() {
+        audioDecoder.discardBuffered(Channel.ID_AUD)
+    }
+
+    fun resumeMediaAudio() {
+        audioDecoder.resumeAfterPause(Channel.ID_AUD)
+    }
+
     fun reclaimPlaybackFocusIfNeeded() {
         if (staticAudioFocus || !enableAudioSink) return
         if (holdingPlaybackFocus) return
@@ -371,6 +377,7 @@ internal class AapAudio(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             audioFocusRequest?.let { mediaAudioManager.abandonAudioFocusRequest(it) }
             audioFocusRequest = null
+            releaseMediaFocus()
             playbackFocusRequest?.let { mediaAudioManager.abandonAudioFocusRequest(it) }
             playbackFocusRequest = null
         } else {
@@ -453,6 +460,14 @@ internal class AapAudio(
     }
 
     private fun onAudioPlaybackStarted(channel: Int) {
+        // Music focus is the phone's own request (AapControl), as stock AllGo; not one per stream.
+        if (channel == Channel.ID_AUD) {
+            ProjectedMedia.wifiMusicPlaying = true
+            // After a reconnect the phone resumes music without a GAIN request; streaming counts as one.
+            ProjectedMedia.phoneWantsMusicFocus = true
+            ProjectedMedia.onMusicFocusInputsChanged?.invoke()
+            return
+        }
         if (staticAudioFocus || !enableAudioSink || !Channel.isAudio(channel)) return
 
         // Only the set mutation belongs under the lock. requestPlaybackFocus() is a binder
@@ -481,6 +496,11 @@ internal class AapAudio(
             return
         }
 
+        if (!AaAudioUsagePolicy.speechStreamNeedsFocus(phoneFocusHeld = audioFocusRequest != null)) {
+            AppLog.i("AapAudio: AA audio started (${Channel.name(channel)}) - the phone's focus request already covers it")
+            return
+        }
+
         // Use GAIN_TRANSIENT, not GAIN: a permanent GAIN sends other players (e.g. the car
         // radio) a permanent AUDIOFOCUS_LOSS, so they stop and do NOT resume when we later
         // abandon focus. TRANSIENT sends AUDIOFOCUS_LOSS_TRANSIENT so they pause and resume
@@ -497,6 +517,10 @@ internal class AapAudio(
      * letting other local sources (e.g. the car radio) resume.
      */
     private fun onAudioPlaybackStopped(channel: Int) {
+        if (channel == Channel.ID_AUD) {
+            ProjectedMedia.wifiMusicPlaying = false
+            return
+        }
         if (staticAudioFocus || !enableAudioSink || !Channel.isAudio(channel)) return
 
         val nowEmpty = synchronized(activeAudioChannels) {

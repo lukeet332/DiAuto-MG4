@@ -953,6 +953,9 @@ class AapProjectionActivity : SurfaceActivity(), IProjectionView.Callbacks, Vide
 
     override fun onPause() {
         isForeground = false
+        lastPausedElapsedMs = android.os.SystemClock.elapsedRealtime()
+        resumed = null
+        com.andrerinas.openheadunit.bridge.AllGoBridgeLink.screen(visible = false)
         AppLog.i("AapProjectionActivity: onPause")
         super.onPause()
         RenameNotice.dismiss()
@@ -988,6 +991,8 @@ class AapProjectionActivity : SurfaceActivity(), IProjectionView.Callbacks, Vide
         super.onResume()
         isForeground = true
         AppLog.i("AapProjectionActivity: onResume")
+        resumed = java.lang.ref.WeakReference(this)
+        com.andrerinas.openheadunit.bridge.AllGoBridgeLink.screen(visible = true)
         // Show the one-time rename notice even here, on top of an active projection.
         RenameNotice.maybeShow(this, App.provide(this).settings)
         applyStickyOrientation()
@@ -1816,6 +1821,11 @@ class AapProjectionActivity : SurfaceActivity(), IProjectionView.Callbacks, Vide
             return super.dispatchKeyEvent(event)
         }
 
+        if (!ProjectionKeyPolicy.shouldForwardCarKey(cachedKeyCodes, event.keyCode)) {
+            if (action == KeyEvent.ACTION_DOWN) AppLog.i("Projection: not forwarding car navigation key ${event.keyCode} to Android Auto")
+            return true
+        }
+
         // 2. Funnel all other keys to CommManager
         commManager.sendKey(event.keyCode, event.action == KeyEvent.ACTION_DOWN, event.downTime, "projection")
         return true
@@ -1881,6 +1891,12 @@ class AapProjectionActivity : SurfaceActivity(), IProjectionView.Callbacks, Vide
         /** Align with AapService USER_EXIT_COOLDOWN_MS so reconnect spam stays quiet for one settle window. */
         private const val WIFI_DISCONNECT_TOAST_COOLDOWN_MS = 15_000L
         @Volatile var isForeground = false
+        @Volatile private var resumed: java.lang.ref.WeakReference<AapProjectionActivity>? = null
+
+        /** Sends the projection behind whatever the car is opening; false when it is not on screen. */
+        fun moveToBack(): Boolean = resumed?.get()?.moveTaskToBack(true) == true
+        /** When projection last lost the foreground; tells a call screen that just covered it from one opened later. */
+        @Volatile var lastPausedElapsedMs = 0L
 
         /**
          * Optional one-shot override for the loading-screen status text. Set by

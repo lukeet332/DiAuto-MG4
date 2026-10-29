@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Emulator stand-in for the MG4's AllGo hub: drives the bridge through a scripted session. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sharedUserId="android.uid.system">
+
+    <uses-permission android:name="android.permission.BIND_TELECOM_CONNECTION_SERVICE" />
+    <uses-permission android:name="com.allgo.app.androidauto.permission.DIAUTO_LINK" />
+
+    <application android:label="Hub sim">
+        <activity android:name=".HubSimActivity" android:exported="true" />
+    </application>
+</manifest>

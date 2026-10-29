@@ -1,10 +1,8 @@
 package com.andrerinas.openheadunit.decoder
 
-import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
-import com.evsuite.hardware.saic.SaicCarAudioSource
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
@@ -102,6 +100,9 @@ class AudioTrackWrapper(
     private val bytesPerFrame: Int = channelCount * (if (bitDepth == 16) 2 else 1)
     private val mediaJitterStartBytes: Int
     private var bytesWrittenBeforePlay: Int = 0
+    private val trackLock = Any()
+    /** The phone reported a pause: drop the tail it still streams until it reports playing. */
+    @Volatile private var pausedByPhone = false
     @Volatile private var mediaPlaybackStarted: Boolean = true
 
     init {
@@ -273,7 +274,8 @@ class AudioTrackWrapper(
         if (mixer != null) {
             mixer.feed(channelId, buffer, 0, size)
             framesWritten += size / bytesPerFrame
-        } else {
+        } else synchronized(trackLock) {
+            if (pausedByPhone) return
             applyGain(buffer, size)
             val track = audioTrack ?: return
             val result = track.write(buffer, 0, size)
@@ -439,32 +441,11 @@ class AudioTrackWrapper(
         AppLog.i("Audio stream: $stream buffer size: $bufferSize (min: $minBufferSize) sampleRateInHz: $sampleRateInHz channelCount: $channelCount")
 
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val (usage, contentType) = when (stream) {
-                AudioManager.STREAM_NOTIFICATION -> Pair(
-                    AudioAttributes.USAGE_NOTIFICATION,
-                    AudioAttributes.CONTENT_TYPE_SONIFICATION
-                )
-                AudioManager.STREAM_VOICE_CALL -> Pair(
-                    AudioAttributes.USAGE_VOICE_COMMUNICATION,
-                    AudioAttributes.CONTENT_TYPE_SPEECH
-                )
-                else -> Pair(
-                    AudioAttributes.USAGE_MEDIA,
-                    AudioAttributes.CONTENT_TYPE_MUSIC
-                )
-            }
-
-            val attrBuilder = AudioAttributes.Builder()
-                .setUsage(usage)
-                .setContentType(contentType)
-                .setLegacyStreamType(stream)
-            // Tag every AA sink (media, Gemini/AU1, nav/notification/AU2) as Android Auto
-            // (70) so the SAIC amp routes hybrid speech PCM as well as Wi‑Fi media.
-            SaicCarAudioSource.attachSourceType(
-                attrBuilder,
-                SaicCarAudioSource.SRC_ANDROID_AUTO,
+            // By channel, as stock AllGo: only music is the car's Android Auto source; prompts and the
+            // assistant duck it. (A legacy stream type here would override the usage.)
+            val audioAttributes = com.andrerinas.openheadunit.aap.AaAudioUsagePolicy.audioAttributes(
+                com.andrerinas.openheadunit.aap.AaAudioUsagePolicy.forChannel(channelId, com.andrerinas.openheadunit.aap.ProjectedMedia.assistantActive),
             )
-            val audioAttributes = attrBuilder.build()
 
             val audioFormat = AudioFormat.Builder()
                 .setSampleRate(sampleRateInHz)
@@ -530,6 +511,30 @@ class AudioTrackWrapper(
         setVolume(gain)
     }
 
+    /** Drops what is queued and buffered so a pause is heard now; silent until [resumeAfterPause]. */
+    fun discardBuffered() {
+        if (mixer != null) return
+        drainQueuedAudio()
+        synchronized(trackLock) {
+            pausedByPhone = true
+            val track = audioTrack ?: return
+            try {
+                track.pause()
+                track.flush()
+                bytesWrittenBeforePlay = 0
+                mediaPlaybackStarted = mediaJitterStartBytes <= 0
+                if (mediaPlaybackStarted) track.play()
+            } catch (e: Exception) {
+                AppLog.e("Error discarding buffered audio", e)
+            }
+        }
+    }
+
+    /** Re-buffers before playing again, as at stream start. */
+    fun resumeAfterPause() {
+        pausedByPhone = false
+    }
+
     fun stopPlayback() {
         isRunning = false
         this.interrupt()
@@ -564,9 +569,17 @@ class AudioTrackWrapper(
             mixer.unregisterChannel(channelId)
         }
 
-        // 3. Gracefully stop the AudioTrack – stop() plays remaining buffer data
+        // 3. Gracefully stop the AudioTrack – stop() plays remaining buffer data. Music is the
+        // exception: its jitter buffer is over a second, which a pause should not have to wait out.
         val track = audioTrack
-        if (track != null && track.playState == AudioTrack.PLAYSTATE_PLAYING) {
+        if (track != null && track.playState == AudioTrack.PLAYSTATE_PLAYING && AudioStopPolicy.discardBufferedOnStop(channelId)) {
+            try {
+                track.pause()
+                track.flush()
+            } catch (e: Exception) {
+                AppLog.e("Error discarding buffered music", e)
+            }
+        } else if (track != null && track.playState == AudioTrack.PLAYSTATE_PLAYING) {
             try {
                 track.stop()
 

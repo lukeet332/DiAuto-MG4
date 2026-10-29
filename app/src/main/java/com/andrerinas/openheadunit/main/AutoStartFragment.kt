@@ -43,6 +43,7 @@ class AutoStartFragment : Fragment() {
     private var pendingAutoStartOnScreenOn: Boolean? = null
     private var pendingListenForUsbDevices: Boolean? = null
     private var pendingBlockOemAndroidAuto: Boolean? = null
+    private var pendingNativeCarIntegration: Boolean? = null
     private var pendingAutoStartOnUsb: Boolean? = null
     private val pendingAutoStartBtMacs = mutableSetOf<String>()
     private var pendingAutoStartOnWifi: Boolean? = null
@@ -84,6 +85,7 @@ class AutoStartFragment : Fragment() {
         pendingAutoStartOnScreenOn = settings.autoStartOnScreenOn
         pendingListenForUsbDevices = settings.listenForUsbDevices
         pendingBlockOemAndroidAuto = settings.blockOemAndroidAutoWhileRunning
+        pendingNativeCarIntegration = settings.nativeCarIntegration
         pendingAutoStartOnUsb = settings.autoStartOnUsb
         pendingAutoStartBtMacs.clear()
         pendingAutoStartBtMacs.addAll(settings.autoStartBluetoothDeviceMacs)
@@ -177,6 +179,12 @@ class AutoStartFragment : Fragment() {
                     requireContext(),
                     "settings-save",
                 )
+            }
+        }
+        pendingNativeCarIntegration?.let {
+            if (it != settings.nativeCarIntegration) {
+                settings.nativeCarIntegration = it
+                com.andrerinas.openheadunit.bridge.AllGoBridgeInstaller.sync(requireContext())
             }
         }
         pendingAutoStartOnUsb?.let {
@@ -273,6 +281,7 @@ class AutoStartFragment : Fragment() {
                 pendingAutoStartOnScreenOn != settings.autoStartOnScreenOn ||
                 pendingListenForUsbDevices != settings.listenForUsbDevices ||
                 pendingBlockOemAndroidAuto != settings.blockOemAndroidAutoWhileRunning ||
+                pendingNativeCarIntegration != settings.nativeCarIntegration ||
                 pendingAutoStartOnUsb != settings.autoStartOnUsb ||
                 pendingAutoStartBtMacs != settings.autoStartBluetoothDeviceMacs ||
                 pendingAutoStartOnWifi != settings.autoStartOnWifi ||
@@ -337,6 +346,17 @@ class AutoStartFragment : Fragment() {
             isChecked = pendingBlockOemAndroidAuto!!,
             onCheckedChanged = { isChecked ->
                 pendingBlockOemAndroidAuto = isChecked
+                checkChanges()
+            }
+        ))
+
+        items.add(SettingItem.ToggleSettingEntry(
+            stableId = "nativeCarIntegration",
+            nameResId = R.string.native_car_integration_label,
+            descriptionResId = R.string.native_car_integration_description,
+            isChecked = pendingNativeCarIntegration!!,
+            onCheckedChanged = { isChecked ->
+                pendingNativeCarIntegration = isChecked
                 checkChanges()
             }
         ))

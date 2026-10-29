@@ -2050,6 +2050,16 @@ object EVHardware {
     private const val CAR_STATE_SERVICE_CODE = 0xb
     @Volatile private var sCarState: Any? = null                   // A9 : CarStateClient (lazy)
 
+    /** SystemUI's steering-wheel function mode (CAN 5204): 0 head unit, 1 cluster, 2 climate; null if unreadable. */
+    fun getSwcFunctionMode(): Int? {
+        val vcm = sVcm ?: return null
+        return try {
+            vcm.javaClass.getMethod("getSwcFunctionChangeSwa").invoke(vcm) as? Int
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "  getSwcFunctionChangeSwa err: ${e.javaClass.simpleName}: ${e.message}"); null
+        }
+    }
+
     /** SWI68/165 : VehicleConditionManager.getCarGear() (poll synchrone via sVcm). */
     private fun readVcmCarGear(): Int {
         val vcm = sVcm ?: return Int.MIN_VALUE

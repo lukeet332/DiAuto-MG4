@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import com.andrerinas.openheadunit.aap.protocol.Channel
 import com.andrerinas.openheadunit.aap.protocol.proto.NavigationStatus
+import com.andrerinas.openheadunit.bridge.AllGoBridgeLink
 import com.andrerinas.openheadunit.utils.AppLog
 import com.andrerinas.openheadunit.utils.Settings
 
@@ -16,7 +17,10 @@ class AapNavigation(
     private val context: Context,
     private val settings: Settings
 ) {
-    init { com.andrerinas.openheadunit.hud.BydNavigationOutputs.start(context) }
+    init {
+        com.andrerinas.openheadunit.hud.BydNavigationOutputs.start(context)
+        com.andrerinas.openheadunit.hud.SaicClusterNavigation.start(context)
+    }
 
     private val helper = AapNavigationHelper(context)
     private val snapshot = AapNavigationHelper.NavigationSnapshot()
@@ -27,6 +31,9 @@ class AapNavigation(
     private val debouncedBroadcastEmitter = Runnable {
         isBroadcastScheduled = false
         helper.sendFullNavigationBroadcast(snapshot, pendingNavEventType)
+        com.andrerinas.openheadunit.hud.SaicClusterNavigation.publish(
+            snapshot, navigationEnded = pendingNavEventType == NAV_EVENT_TYPE_STOP
+        )
     }
 
     fun process(message: AapMessage): Boolean {
@@ -167,6 +174,7 @@ class AapNavigation(
     }
 
     private fun updateClusterStatus(status: NavigationStatus.NavigationClusterStatus) {
+        AllGoBridgeLink.navigation(status.status.number)
         val now = helper.nowElapsedRealtimeMs()
         val newStatus = AapNavigationHelper.TimedMessage(status, now)
         val previous = snapshot.clusterStatus?.payload?.status

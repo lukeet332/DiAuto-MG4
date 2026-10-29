@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Same package, signature and sharedUserId as AllGo's Android Auto app so it installs as an
+     update over it; uninstalling the update restores AllGo. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sharedUserId="android.uid.system">
+
+    <permission
+        android:name="com.allgo.app.androidauto.permission.DIAUTO_LINK"
+        android:protectionLevel="signature" />
+
+    <application
+        android:allowBackup="false"
+        android:label="Android Auto">
+
+        <!-- DiAuto stops force-stopping com.allgo.app.androidauto when it sees this. -->
+        <meta-data
+            android:name="com.drivehub.diauto.bridge"
+            android:value="true" />
+
+        <service
+            android:name=".AndroidAutoMainService"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
+            <intent-filter>
+                <action android:name="com.allgo.app.androidauto.AndroidAutoMainService" />
+                <action android:name="com.allgo.app.androidauto.IAndroidAutoMainService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".DiAutoLinkService"
+            android:exported="true"
+            android:permission="com.allgo.app.androidauto.permission.DIAUTO_LINK" />
+
+        <activity
+            android:name=".ProjectionActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+    </application>
+</manifest>

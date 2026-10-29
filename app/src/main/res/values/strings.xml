@@ -1087,7 +1087,7 @@
     <string name="diagnostic_file_picker_unavailable">No file picker is available. Use Save diagnostic report on Android 10 or newer.</string>
     <string name="diagnostic_saving_report">Saving report…</string>
     <string name="diagnostic_report_saved">Diagnostic report saved</string>
-    <string name="diagnostic_saved_to_your_selected_location">Saved to your selected location.</string>
+    <string name="diagnostic_saved_to_your_selected_location">Saved to your selected location. It\'s safe to remove the USB stick now.</string>
     <string name="diagnostic_share_diagnostic_report">Share diagnostic report</string>
     <string name="diagnostic_share_manually">Report saved. Open it from your file manager to share it.</string>
     <string name="diagnostic_done">Done</string>
@@ -1103,4 +1103,7 @@
     <string name="audio_queue_backlog">Unbounded (Max backlog)</string>
     <string name="keymap_test_hint">Press any key to test…</string>
     <string name="keymap_test_event">Key: %1$s (%2$d) · %3$s</string>
+    <string name="native_car_integration_description">Installs DiAuto\'s bridge over the car\'s AllGo Android Auto so the home tile, call screen, dock and media controls treat DiAuto as Android Auto. Turn off to restore AllGo. Takes effect after the car restarts.</string>
+    <string name="native_car_integration_label">Native car integration</string>
+    <string name="wifi_paused_for_android_auto">Car Wi-Fi paused while Android Auto is connected (no 5 GHz network to share). It comes back when Android Auto disconnects.</string>
 </resources>
