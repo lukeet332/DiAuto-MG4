@@ -43,6 +43,23 @@ class DecoderStopPolicyTest {
     }
 
     @Test
+    fun `only a destroyed surface is retired`() {
+        // A destroyed Surface still reports isValid until it is actually released, so decode()
+        // must not restart on it in that window.
+        assertTrue(DecoderStopPolicy.retiresSurface(DecoderStopPolicy.REASON_SURFACE_DESTROYED))
+        assertFalse(DecoderStopPolicy.retiresSurface(DecoderStopPolicy.REASON_NEW_SURFACE))
+        assertFalse(DecoderStopPolicy.retiresSurface("restart: sync_stall"))
+        assertFalse(DecoderStopPolicy.retiresSurface("CommManager: doDisconnect"))
+    }
+
+    @Test
+    fun `a retired surface cannot host a decoder even while it still reports valid`() {
+        assertFalse(DecoderStopPolicy.canStartOn(surfaceValid = true, surfaceRetired = true))
+        assertFalse(DecoderStopPolicy.canStartOn(surfaceValid = false, surfaceRetired = false))
+        assertTrue(DecoderStopPolicy.canStartOn(surfaceValid = true, surfaceRetired = false))
+    }
+
+    @Test
     fun `a disconnect ends the session`() {
         // These two clear the codec pin, which is what lets a reconnect renegotiate a new codec.
         assertTrue(DecoderStopPolicy.endsSession("CommManager: doDisconnect"))

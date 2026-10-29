@@ -200,6 +200,8 @@ class VideoDecoder(
     private var softwareHevcDecoder: FfmpegHevcDecoder? = null
     private var codecBufferInfo: MediaCodec.BufferInfo? = null
     private var mSurface: Surface? = null
+    /** Set once [mSurface] is destroyed; it still reports valid until released. */
+    private var surfaceRetired = false
     private var outputThread: Thread? = null
     @Volatile private var running = false
     private var startTime = 0L
@@ -493,6 +495,8 @@ class VideoDecoder(
      */
     fun setSurface(surface: Surface?) {
         synchronized(this) {
+            // Before the identity check: SurfaceView hands back the same Surface on resume.
+            surfaceRetired = false
             if (mSurface === surface) return
 
             AppLog.i("New surface set: $surface")
@@ -532,6 +536,7 @@ class VideoDecoder(
             return false
         }
         stop(reason)
+        if (DecoderStopPolicy.retiresSurface(reason)) surfaceRetired = true
         true
     }
 
@@ -788,7 +793,7 @@ class VideoDecoder(
                     }
                 }
 
-                if (mSurface == null || !mSurface!!.isValid) return
+                if (!DecoderStopPolicy.canStartOn(mSurface?.isValid == true, surfaceRetired)) return
                 if (mWidth == 0 || mHeight == 0) return
 
                 if (shouldUseBundledHevc(typeToUse, settings.forceSoftwareDecoding || forceSoftware)) {

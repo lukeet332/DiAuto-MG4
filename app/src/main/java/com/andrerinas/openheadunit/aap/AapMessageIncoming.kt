@@ -42,8 +42,10 @@ internal class AapMessageIncoming(header: EncryptedHeader, ba: ByteArrayWithLimi
 
             // The payload length is ba.limit, not ba.data.size: the SSL layer hands back one reused
             // buffer whose length is the session ceiling, so data.size is always large enough and
-            // this guard would never fire. Two bytes are needed for the message type read below.
-            if (ba.limit < 2) {
+            // this guard would never fire. Only a first (or unfragmented) frame carries the 2-byte
+            // message type; a continuation fragment of 1 byte is legal and ends a video frame.
+            val minLength = if (header.flags and 0x01 != 0) 2 else 1
+            if (ba.limit < minLength) {
                 AppLog.e("Decrypted payload too short: " + ba.limit)
                 return null
             }
