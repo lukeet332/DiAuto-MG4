@@ -706,11 +706,6 @@ class AapService : Service(), UsbReceiver.Listener {
 
         val settings = App.provide(this).settings
 
-        if (settings.autoStartOnBoot) {
-            AppLog.i("WakeDetect: launching UI (trigger=$trigger)")
-            launchMainActivityOnBoot()
-        }
-
         if (settings.autoStartOnUsb) {
             AppLog.i("WakeDetect: checking USB devices (trigger=$trigger)")
             checkAlreadyConnectedUsb(force = true)
@@ -738,7 +733,7 @@ class AapService : Service(), UsbReceiver.Listener {
      * Designed for head units that never truly power off — screen on = car turned on.
      *
      * If the connection is still active (e.g. brief screen toggle), returns to the
-     * projection activity. Otherwise launches the main UI and checks USB.
+     * projection activity. Otherwise only checks USB; the UI waits for the phone.
      */
     private fun onScreenOnAutoStart() {
         // Debounce: don't re-trigger within 5 seconds
@@ -776,10 +771,7 @@ class AapService : Service(), UsbReceiver.Listener {
             return
         }
 
-        // Not connected — launch UI (which triggers auto-connect via HomeFragment)
-        AppLog.i("WakeDetect: launching UI on screen on")
-        launchMainActivityOnBoot()
-
+        // Not connected: the service is already listening, so the UI waits for the phone.
         val settings = App.provide(this).settings
         if (settings.autoStartOnUsb) {
             AppLog.i("WakeDetect: checking USB devices on screen on")
@@ -2186,12 +2178,6 @@ class AapService : Service(), UsbReceiver.Listener {
 
         // Route MEDIA_BUTTON intents to the active MediaSession.
         safeMediaSessionCall { MediaButtonReceiver.handleIntent(it, intent) }
-        // Launch the UI after boot.
-        // Direct startActivity() is silently blocked on MIUI/HyperOS even from
-        // a foreground service. We use an overlay window trampoline: creating a
-        // zero-size overlay gives the app a "visible" context that bypasses OEM
-        // background activity start restrictions. Falls back to full-screen
-        // intent notification if overlay permission is not granted.
         // Acquire a partial wake lock on any boot/screen-on start to resist
         // aggressive power saving on MediaTek/Reglink head units that force-stop
         // third-party apps when ACC is off after a Quick Boot reboot.
@@ -2203,7 +2189,8 @@ class AapService : Service(), UsbReceiver.Listener {
         if (intent?.getBooleanExtra(BootCompleteReceiver.EXTRA_BOOT_START, false) == true) {
             // Mark wake as handled so the dynamic wakeDetectReceiver doesn't double-trigger
             lastWakeHandledTimestamp = SystemClock.elapsedRealtime()
-            launchMainActivityOnBoot()
+            // Start in the background: the UI shows itself once the phone connects.
+            AppLog.i("Boot auto-start: service up in the background, UI stays closed")
         }
 
         when (intent?.action) {
