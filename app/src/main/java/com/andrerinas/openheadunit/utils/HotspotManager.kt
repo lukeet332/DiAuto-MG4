@@ -16,6 +16,7 @@ import com.andrerinas.openheadunit.aap.ApInterfaceCandidate
 import com.andrerinas.openheadunit.aap.SoftApBandPolicy
 import com.andrerinas.openheadunit.aap.SoftApNetworkPolicy
 import com.andrerinas.openheadunit.aap.SoftApState
+import com.andrerinas.openheadunit.aap.StationPausePolicy
 
 /**
  * Manages WiFi Hotspot (tethering) using reflection + dexmaker.
@@ -152,7 +153,20 @@ object HotspotManager {
         return ok
     }
 
-    /** Switches the car's Wi-Fi back on, but only if [pauseStationIfOn2Ghz] switched it off. */
+    /** Switches the car's Wi-Fi off mid-session if it is only scanning; see [StationPausePolicy]. */
+    fun pauseScanningStation(context: Context, hotspotSession: Boolean) {
+        val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val freq = try { wifi.connectionInfo?.frequency ?: -1 } catch (e: Exception) { -1 }
+        if (!StationPausePolicy.shouldPauseDuringSession(wifi.isWifiEnabled, freq, hotspotSession)) return
+        AppLog.i("HotspotManager: car Wi-Fi is on but not connected, so its scans keep taking the radio off the hotspot - switching it off for this session")
+        stationPrefs(context).edit().putBoolean(KEY_STATION_PAUSED, true).apply()
+        @Suppress("DEPRECATION")
+        try { wifi.setWifiEnabled(false) } catch (e: Exception) {
+            AppLog.w("HotspotManager: could not switch the car Wi-Fi off: ${e.message}")
+        }
+    }
+
+    /** Switches the car's Wi-Fi back on, but only if this class switched it off. */
     fun restorePausedStation(context: Context) {
         val prefs = stationPrefs(context)
         if (!prefs.getBoolean(KEY_STATION_PAUSED, false)) return

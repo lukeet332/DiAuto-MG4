@@ -104,6 +104,7 @@ class AapService : Service(), UsbReceiver.Listener {
     // SupervisorJob prevents a child coroutine failure from cancelling the whole scope
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var stationRestoreJob: Job? = null
+    private var stationWatchJob: Job? = null
 
     private lateinit var uiModeManager: UiModeManager
     private lateinit var usbReceiver: UsbReceiver
@@ -1099,6 +1100,16 @@ class AapService : Service(), UsbReceiver.Listener {
         updateNotification()
         acquireWifiLock()
 
+        // Checked through the session too: the car can drop off home Wi-Fi mid-drive and start scanning.
+        stationRestoreJob?.cancel()
+        stationWatchJob?.cancel()
+        stationWatchJob = serviceScope.launch(Dispatchers.IO) {
+            while (true) {
+                HotspotManager.pauseScanningStation(this@AapService, nativeTransport() == NativeTransport.HOTSPOT)
+                delay(STATION_WATCH_INTERVAL_MS)
+            }
+        }
+
         // Silent audio hack removed to prevent mixing/resampling stuttering issues
 
         // Register the comprehensive steering wheel key receiver
@@ -1353,6 +1364,7 @@ class AapService : Service(), UsbReceiver.Listener {
     private fun onDisconnected(state: CommManager.ConnectionState.Disconnected) {
         com.andrerinas.openheadunit.hud.SaicNavigationOutputs.stop()
         // Give the car Wi-Fi back once wireless Android Auto has stayed down for a while.
+        stationWatchJob?.cancel()
         stationRestoreJob?.cancel()
         stationRestoreJob = serviceScope.launch(Dispatchers.IO) {
             delay(HotspotManager.STATION_RESTORE_DELAY_MS)
@@ -3931,6 +3943,9 @@ class AapService : Service(), UsbReceiver.Listener {
 
 
     companion object {
+        /** How often a session checks whether the car Wi-Fi has started scanning. */
+        private const val STATION_WATCH_INTERVAL_MS = 10_000L
+
         /** Bind attempts before the wireless server gives up and reports the port unusable. */
         private const val BIND_ATTEMPTS = 3
 
